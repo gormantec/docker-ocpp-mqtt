@@ -610,70 +610,29 @@ async def handle_schedule_post(request):
 
         else:
             _LOGGER.info("Setting scheduled profile for %s", cp_id)
-            result = None
-            # Patterns from working chargepoint.py — try multiple
             from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
-            from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType, RecurrencyKind
+            from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
 
-            formats = [
-                # Format 1: Two periods in WATTS (charger only accepts W, not A!)
-                ChargingProfile(
+            # Charger only accepts W (watts), not A (amps). 240V system:
+            # 20A × 240V = 4800W, 6A × 240V = 1440W
+            result = await cp.call(SetChargingProfile(
+                connector_id=0,
+                cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
                     charging_profile_kind=ChargingProfileKindType.relative,
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),     # 20A peak
-                            ChargingSchedulePeriod(start_period=57600, limit=1440.0), # 6A off-peak
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),     # 12am-4pm: 20A
+                            ChargingSchedulePeriod(start_period=57600, limit=1440.0), # 4pm-12am: 6A
                         ],
                     ),
                 ),
-                # Format 2: Single period 4800W (always-on fallback)
-                ChargingProfile(
-                    charging_profile_id=1, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
-                        ],
-                    ),
-                ),
-                # Format 3: Two periods, Recurring Daily (watts)
-                ChargingProfile(
-                    charging_profile_id=1, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.recurring,
-                    recurrency_kind=RecurrencyKind.daily,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
-                            ChargingSchedulePeriod(start_period=57600, limit=1440.0),
-                        ],
-                    ),
-                ),
-            ]
-            for i, profile in enumerate(formats):
-                try:
-                    call_result = await cp.call(SetChargingProfile(
-                        connector_id=0,
-                        cs_charging_profiles=profile,
-                    ))
-                    status = getattr(call_result, "status", str(call_result))
-                    _LOGGER.info("Format %d response: %s", i + 1, status)
-                    if status == "Accepted":
-                        result = call_result
-                        _LOGGER.info("Format %d ACCEPTED!", i + 1)
-                        break
-                    _LOGGER.warning("Format %d rejected (status=%s)", i + 1, status)
-                except Exception as e:
-                    _LOGGER.warning("Format %d error: %s", i + 1, e)
+            ))
 
             _schedule_state[cp_id] = {"mode": "scheduled"}
-            _record_event(cp_id, "schedule", "Mode: scheduled (20A 12am-4pm, 6A 4pm-12am)")
+            _record_event(cp_id, "schedule", "Mode: scheduled (4800W 12am-4pm, 1440W 4pm-12am)")
 
         await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode, "result": str(result)})
         return web.json_response({"status": "ok", "mode": mode})
