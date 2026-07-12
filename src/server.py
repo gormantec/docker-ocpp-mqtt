@@ -306,12 +306,16 @@ class _AiohttpWsAdapter:
         msg = await self._ws.receive()
         if msg.type == WSMsgType.TEXT:
             return msg.data
+        elif msg.type == WSMsgType.BINARY:
+            # Some chargers send binary frames — decode as UTF-8
+            return msg.data.decode("utf-8")
         elif msg.type == WSMsgType.CLOSE:
             raise ConnectionError("WebSocket closed")
         elif msg.type == WSMsgType.ERROR:
             raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
         else:
-            raise ConnectionError(f"Unexpected message type: {msg.type}")
+            _LOGGER.warning("Unexpected WS message type: %s, ignoring", msg.type)
+            return await self.recv()  # skip and try next
 
     async def send(self, data: str):
         await self._ws.send_str(data)
