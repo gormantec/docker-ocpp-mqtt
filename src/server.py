@@ -597,9 +597,9 @@ async def handle_schedule_post(request):
                         charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
                         charging_profile_kind=ChargingProfileKindType.relative,
                         charging_schedule=ChargingSchedule(
-                            charging_rate_unit=ChargingRateUnitType.amps,
+                            charging_rate_unit=ChargingRateUnitType.watts,
                             charging_schedule_period=[
-                                ChargingSchedulePeriod(start_period=0, limit=20.0),
+                                ChargingSchedulePeriod(start_period=0, limit=4800.0),
                             ],
                         ),
                     ),
@@ -616,57 +616,20 @@ async def handle_schedule_post(request):
             from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType, RecurrencyKind
 
             formats = [
-                # Format 1: Relative, single period, connector 0
+                # Format 1: Two periods in WATTS (charger only accepts W, not A!)
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
                     charging_profile_kind=ChargingProfileKindType.relative,
                     charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.amps,
+                        charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=20.0),
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),     # 20A peak
+                            ChargingSchedulePeriod(start_period=57600, limit=1440.0), # 6A off-peak
                         ],
                     ),
                 ),
-                # Format 2: Same but connector 1
-                ChargingProfile(
-                    charging_profile_id=1, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.amps,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=20.0),
-                        ],
-                    ),
-                ),
-                # Format 3: Raw dict attempt — bare minimum
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Relative",
-                    "charging_schedule": {
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                        ],
-                    },
-                },
-                # Format 4: Absolute kind with validFrom/To
-                ChargingProfile(
-                    charging_profile_id=1, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.absolute,
-                    valid_from="2026-01-01T00:00:00Z",
-                    valid_to="2036-01-01T00:00:00Z",
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.amps,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=20.0),
-                        ],
-                    ),
-                ),
-                # Format 5: W instead of A
+                # Format 2: Single period 4800W (always-on fallback)
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
@@ -678,13 +641,25 @@ async def handle_schedule_post(request):
                         ],
                     ),
                 ),
+                # Format 3: Two periods, Recurring Daily (watts)
+                ChargingProfile(
+                    charging_profile_id=1, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.recurring,
+                    recurrency_kind=RecurrencyKind.daily,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.watts,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                            ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                        ],
+                    ),
+                ),
             ]
-            connectors = [0, 1, 0, 0, 0]  # Format 2 uses connector 1
             for i, profile in enumerate(formats):
-                conn = connectors[i]
                 try:
                     call_result = await cp.call(SetChargingProfile(
-                        connector_id=conn,
+                        connector_id=0,
                         cs_charging_profiles=profile,
                     ))
                     status = getattr(call_result, "status", str(call_result))
