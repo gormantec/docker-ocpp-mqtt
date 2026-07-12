@@ -279,6 +279,38 @@ class MqttChargePoint(BaseChargePoint):
 
 
 # ---------------------------------------------------------------------------
+# aiohttp WebSocket → ocpp library adapter
+# ---------------------------------------------------------------------------
+
+class _AiohttpWsAdapter:
+    """
+    Wraps aiohttp.web.WebSocketResponse to provide the websockets-like
+    recv()/send()/close() API that the ocpp library's ChargePoint.start()
+    expects.
+    """
+
+    def __init__(self, ws: web.WebSocketResponse):
+        self._ws = ws
+
+    async def recv(self) -> str:
+        msg = await self._ws.receive()
+        if msg.type == WSMsgType.TEXT:
+            return msg.data
+        elif msg.type == WSMsgType.CLOSE:
+            raise ConnectionError("WebSocket closed")
+        elif msg.type == WSMsgType.ERROR:
+            raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
+        else:
+            raise ConnectionError(f"Unexpected message type: {msg.type}")
+
+    async def send(self, data: str):
+        await self._ws.send_str(data)
+
+    async def close(self):
+        await self._ws.close()
+
+
+# ---------------------------------------------------------------------------
 # OCPP WebSocket Server (aiohttp)
 # ---------------------------------------------------------------------------
 
@@ -292,7 +324,9 @@ async def ocpp_ws_handler(request: web.Request):
     ws = web.WebSocketResponse(protocols=["ocpp1.6"])
     await ws.prepare(request)
 
-    cp = MqttChargePoint(cp_id, ws)
+    # Wrap aiohttp WS in adapter so ocpp library can use recv()/send()
+    adapted = _AiohttpWsAdapter(ws)
+    cp = MqttChargePoint(cp_id, adapted)
     _active_cps[cp_id] = cp
 
     try:
