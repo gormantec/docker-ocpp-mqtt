@@ -628,14 +628,19 @@ async def handle_schedule_post(request):
             ]
             for i, profile in enumerate(formats):
                 try:
-                    result = await cp.call(SetChargingProfile(
+                    call_result = await cp.call(SetChargingProfile(
                         connector_id=0,
                         cs_charging_profiles=profile,
                     ))
-                    _LOGGER.info("Format %d ACCEPTED!", i + 1)
-                    break
+                    status = getattr(call_result, "status", str(call_result))
+                    _LOGGER.info("Format %d response: %s", i + 1, status)
+                    if status == "Accepted":
+                        result = call_result
+                        _LOGGER.info("Format %d ACCEPTED!", i + 1)
+                        break
+                    _LOGGER.warning("Format %d rejected (status=%s)", i + 1, status)
                 except Exception as e:
-                    _LOGGER.warning("Format %d rejected: %s", i + 1, e)
+                    _LOGGER.warning("Format %d error: %s", i + 1, e)
 
             _schedule_state[cp_id] = {"mode": "scheduled"}
             _record_event(cp_id, "schedule", "Mode: scheduled (20A 12am-4pm, 6A 4pm-12am)")
