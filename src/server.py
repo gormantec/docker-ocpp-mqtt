@@ -561,20 +561,21 @@ async def handle_schedule_post(request):
                 ))
             except Exception as e:
                 _LOGGER.warning("ClearChargingProfile failed, falling back to 20A flat: %s", e)
+                from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+                from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
                 result = await cp.call(SetChargingProfile(
                     connector_id=0,
-                    cs_charging_profiles={
-                        "charging_profile_id": 1, "stack_level": 0,
-                        "charging_profile_purpose": "TxDefaultProfile",
-                        "charging_profile_kind": "Recurring",
-                        "recurrency_kind": "Daily",
-                        "charging_schedule": {
-                            "charging_rate_unit": "A",
-                            "charging_schedule_period": [
-                                {"start_period": 0, "limit": 20.0},
+                    cs_charging_profiles=ChargingProfile(
+                        charging_profile_id=0, stack_level=0,
+                        charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                        charging_profile_kind=ChargingProfileKindType.relative,
+                        charging_schedule=ChargingSchedule(
+                            charging_rate_unit=ChargingRateUnitType.amps,
+                            charging_schedule_period=[
+                                ChargingSchedulePeriod(start_period=0, limit=20.0),
                             ],
-                        },
-                    },
+                        ),
+                    ),
                 ))
 
             _schedule_state[cp_id] = {"mode": "always_on"}
@@ -583,54 +584,62 @@ async def handle_schedule_post(request):
         else:
             _LOGGER.info("Setting scheduled profile for %s", cp_id)
             result = None
-            # StarCharge may reject certain formats — try multiple
+            # Patterns from working chargepoint.py — try multiple
+            from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+            from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType, RecurrencyKind
+
             formats = [
-                # Format 1: TxProfile (not TxDefaultProfile)
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "charging_schedule": {
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                            {"start_period": 57600, "limit": 6.0},
+                # Format 1: Relative kind, profile_id=1 (from SetChargingProfile)
+                ChargingProfile(
+                    charging_profile_id=1, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.amps,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=20.0),
+                            ChargingSchedulePeriod(start_period=57600, limit=6.0),
                         ],
-                    },
-                },
-                # Format 2: ChargePointMaxProfile
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "ChargePointMaxProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "charging_schedule": {
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                            {"start_period": 57600, "limit": 6.0},
+                    ),
+                ),
+                # Format 2: Relative kind, profile_id=0 (from SetDefaultChargingProfile)
+                ChargingProfile(
+                    charging_profile_id=0, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.amps,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=20.0),
+                            ChargingSchedulePeriod(start_period=57600, limit=6.0),
                         ],
-                    },
-                },
-                # Format 3: TxDefaultProfile with validFrom/validTo
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "valid_from": "2026-01-01T00:00:00Z",
-                    "valid_to": "2036-01-01T00:00:00Z",
-                    "charging_schedule": {
-                        "duration": 86400,
-                        "start_schedule": "2026-01-01T00:00:00Z",
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                            {"start_period": 57600, "limit": 6.0},
+                    ),
+                ),
+                # Format 3: Relative, single period 20A (minimal test)
+                ChargingProfile(
+                    charging_profile_id=0, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.amps,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=20.0),
                         ],
-                    },
-                },
+                    ),
+                ),
+                # Format 4: Recurring Daily, profile_id=0 (from SetDefaultChargingProfile)
+                ChargingProfile(
+                    charging_profile_id=0, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.recurring,
+                    recurrency_kind=RecurrencyKind.daily,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.amps,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=20.0),
+                        ],
+                    ),
+                ),
             ]
             for i, profile in enumerate(formats):
                 try:
