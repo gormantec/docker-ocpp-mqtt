@@ -329,7 +329,7 @@ _active_cps: dict[str, MqttChargePoint] = {}
 
 async def ocpp_ws_handler(request: web.Request):
     """Handle an OCPP WebSocket connection from a charge point."""
-    cp_id = request.match_info.get("charge_point_id", "unknown")
+    cp_id = request.match_info.get("cp_id", "unknown")
 
     ws = web.WebSocketResponse(protocols=["ocpp1.6"])
     await ws.prepare(request)
@@ -519,8 +519,10 @@ async def main():
 
     app = web.Application()
 
-    # OCPP WebSocket endpoint
-    app.router.add_get("/{charge_point_id}", ocpp_ws_handler)
+    # OCPP WebSocket endpoints
+    # Match /{charge_point_id} or /{anything}/{charge_point_id}
+    app.router.add_get("/{cp_id}", ocpp_ws_handler)
+    app.router.add_get("/{prefix}/{cp_id}", ocpp_ws_handler)
 
     # API routes
     app.router.add_get("/debug", handle_debug)
