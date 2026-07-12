@@ -589,7 +589,7 @@ async def handle_schedule_post(request):
             from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType, RecurrencyKind
 
             formats = [
-                # Minimal: Relative, single period, connector 0
+                # Format 1: Relative, single period, connector 0
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
@@ -601,7 +601,7 @@ async def handle_schedule_post(request):
                         ],
                     ),
                 ),
-                # Minimal: same but connector 1
+                # Format 2: Same but connector 1
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
@@ -613,19 +613,19 @@ async def handle_schedule_post(request):
                         ],
                     ),
                 ),
-                # Minimal: no stack_level, Relative
-                ChargingProfile(
-                    charging_profile_id=1,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.amps,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=20.0),
+                # Format 3: Raw dict attempt — bare minimum
+                {
+                    "charging_profile_id": 1, "stack_level": 0,
+                    "charging_profile_purpose": "TxDefaultProfile",
+                    "charging_profile_kind": "Relative",
+                    "charging_schedule": {
+                        "charging_rate_unit": "A",
+                        "charging_schedule_period": [
+                            {"start_period": 0, "limit": 20.0},
                         ],
-                    ),
-                ),
-                # Minimal: Absolute kind with validFrom
+                    },
+                },
+                # Format 4: Absolute kind with validFrom/To
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
@@ -639,7 +639,7 @@ async def handle_schedule_post(request):
                         ],
                     ),
                 ),
-                # Minimal: W instead of A
+                # Format 5: W instead of A
                 ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
