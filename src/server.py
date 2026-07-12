@@ -434,6 +434,19 @@ async def _handle_mqtt_command(cp_id: str, payload: bytes):
                 "update_type": params.get("update_type", "Full"),
                 "local_authorization_list": params.get("local_authorization_list", []),
             }, action="SendLocalList")
+        elif action == "SetChargingProfile":
+            cs_profiles = params.get("cs_charging_profiles", params)
+            result = await cp.call({
+                "connector_id": params.get("connector_id", 0),
+                "cs_charging_profiles": cs_profiles,
+            }, action="SetChargingProfile")
+        elif action == "ClearChargingProfile":
+            result = await cp.call({
+                "id": params.get("id"),
+                "connector_id": params.get("connector_id", 0),
+                "charging_profile_purpose": params.get("charging_profile_purpose"),
+                "stack_level": params.get("stack_level"),
+            }, action="ClearChargingProfile")
         else:
             _LOGGER.warning("Unknown MQTT command action: %s", action)
             return
@@ -511,6 +524,95 @@ async def handle_index(request):
 
 
 # ---------------------------------------------------------------------------
+# Schedule API
+# ---------------------------------------------------------------------------
+
+_schedule_state: dict[str, dict] = {}
+
+async def handle_schedule_post(request):
+    """POST /schedule — Set or clear charging schedule.
+    Body: {"cp_id": "4b8609", "mode": "scheduled"|"always_on"}
+    """
+    try:
+        body = await request.json()
+        cp_id = body.get("cp_id")
+        mode = body.get("mode")
+
+        if not cp_id or mode not in ("scheduled", "always_on"):
+            return web.json_response({"error": "Missing cp_id or invalid mode (use scheduled|always_on)"}, status=400)
+
+        cp = _active_cps.get(cp_id)
+        if not cp:
+            return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
+
+        if mode == "always_on":
+            _LOGGER.info("Clearing charging profile for %s", cp_id)
+            try:
+                result = await cp.call({
+                    "id": 1, "connector_id": 0,
+                    "charging_profile_purpose": "TxDefaultProfile",
+                    "stack_level": 0,
+                }, action="ClearChargingProfile")
+            except Exception as e:
+                _LOGGER.warning("ClearChargingProfile failed, falling back to 20A flat: %s", e)
+                result = await cp.call({
+                    "connector_id": 0,
+                    "cs_charging_profiles": {
+                        "charging_profile_id": 1, "stack_level": 0,
+                        "charging_profile_purpose": "TxDefaultProfile",
+                        "charging_profile_kind": "Recurring",
+                        "recurrency_kind": "Daily",
+                        "charging_schedule": {
+                            "charging_rate_unit": "A",
+                            "charging_schedule_period": [
+                                {"start_period": 0, "limit": 20.0},
+                            ],
+                        },
+                    },
+                }, action="SetChargingProfile")
+
+            _schedule_state[cp_id] = {"mode": "always_on"}
+            _record_event(cp_id, "schedule", "Mode: always_on")
+
+        else:
+            _LOGGER.info("Setting scheduled profile for %s", cp_id)
+            result = await cp.call({
+                "connector_id": 0,
+                "cs_charging_profiles": {
+                    "charging_profile_id": 1, "stack_level": 0,
+                    "charging_profile_purpose": "TxDefaultProfile",
+                    "charging_profile_kind": "Recurring",
+                    "recurrency_kind": "Daily",
+                    "charging_schedule": {
+                        "charging_rate_unit": "A",
+                        "charging_schedule_period": [
+                            {"start_period": 0, "limit": 20.0},
+                            {"start_period": 57600, "limit": 6.0},
+                        ],
+                    },
+                },
+            }, action="SetChargingProfile")
+
+            _schedule_state[cp_id] = {"mode": "scheduled"}
+            _record_event(cp_id, "schedule", "Mode: scheduled (20A 12am-4pm, 6A 4pm-12am)")
+
+        await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode, "result": str(result)})
+        return web.json_response({"status": "ok", "mode": mode})
+
+    except Exception as e:
+        _LOGGER.error("Schedule error: %s", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_schedule_get(request):
+    """GET /schedule — Return schedule state and active CPs."""
+    return web.json_response({
+        "schedule_state": _schedule_state,
+        "active_cps": list(_active_cps.keys()),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -526,6 +628,8 @@ async def main():
     # API routes (must be BEFORE wildcard OCPP routes)
     app.router.add_get("/debug", handle_debug)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/schedule", handle_schedule_get)
+    app.router.add_post("/schedule", handle_schedule_post)
 
     # OCPP WebSocket endpoints
     app.router.add_get("/{cp_id}", ocpp_ws_handler)

@@ -200,6 +200,53 @@ body {
 .badge-warn { background: #FFF3E0; color: #E67A00; }
 .badge-neutral { background: #E8EAED; color: var(--aws-text-secondary); }
 
+/* ===== Buttons ===== */
+.btn {
+  display: inline-block;
+  padding: 6px 16px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--aws-blue);
+  color: #fff;
+  border-color: var(--aws-blue);
+}
+.btn-primary:hover:not(:disabled) { background: #005d96; }
+.btn-secondary {
+  background: #fff;
+  color: var(--aws-text);
+  border-color: var(--aws-border);
+}
+.btn-secondary:hover:not(:disabled) { background: #F0F2F3; }
+
+/* ===== Alert ===== */
+.alert {
+  padding: 10px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.alert-success {
+  background: #E6F4EA;
+  color: var(--aws-green);
+  border: 1px solid #A7D5B6;
+}
+.alert-error {
+  background: #FCE8E4;
+  color: var(--aws-red);
+  border: 1px solid #F5B8B0;
+}
+
 /* ===== Utility ===== */
 .text-green { color: var(--aws-green); }
 .text-red { color: var(--aws-red); }

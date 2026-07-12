@@ -19,15 +19,22 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [schedule, setSchedule] = useState({});
+  const [schedulePending, setSchedulePending] = useState(false);
+  const [scheduleMsg, setScheduleMsg] = useState(null);
 
   const fetchData = async () => {
     try {
-      const response = await fetch(`${BASE}debug`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const json = await response.json();
+      const [debugRes, schedRes] = await Promise.all([
+        fetch(`${BASE}debug`),
+        fetch(`${BASE}schedule`),
+      ]);
+      if (!debugRes.ok) throw new Error(`HTTP ${debugRes.status}`);
+      const json = await debugRes.json();
       setData(json);
       setLastRefresh(new Date());
       setError(null);
+      if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
     } catch (e) {
       setError(e.message);
     } finally {
@@ -44,6 +51,31 @@ export default function App() {
   const chargePoints = data?.charge_points || [];
   const connectedCount = chargePoints.filter(cp => cp.connected).length;
   const totalCount = chargePoints.length;
+  const connectedCps = chargePoints.filter(cp => cp.connected);
+
+  const setScheduleMode = async (cpId, mode) => {
+    setSchedulePending(true);
+    setScheduleMsg(null);
+    try {
+      const res = await fetch(`${BASE}schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cp_id: cpId, mode }),
+      });
+      const result = await res.json();
+      if (res.ok) {
+        setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'scheduled' ? 'Scheduled (20A day / 6A night)' : 'Always On'}` });
+        const schedRes = await fetch(`${BASE}schedule`);
+        if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
+      } else {
+        setScheduleMsg({ type: 'error', text: result.error || 'Failed' });
+      }
+    } catch (e) {
+      setScheduleMsg({ type: 'error', text: e.message });
+    } finally {
+      setSchedulePending(false);
+    }
+  };
 
   return (
     <div className="app">
@@ -231,6 +263,70 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* Schedule Control */}
+            <div className="card">
+              <div className="card-header">
+                <h3>⏱ Schedule Control</h3>
+                <span className="text-secondary" style={{fontSize: 12}}>
+                  Set charging schedule per charge point
+                </span>
+              </div>
+              <div className="card-body">
+                {connectedCps.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No charge points connected. Connect a charger to control its schedule.</p>
+                  </div>
+                ) : (
+                  <>
+                    {scheduleMsg && (
+                      <div className={`alert ${scheduleMsg.type === 'success' ? 'alert-success' : 'alert-error'}`}
+                           style={{ marginBottom: 16, padding: '8px 12px', borderRadius: 4 }}>
+                        {scheduleMsg.text}
+                      </div>
+                    )}
+                    {connectedCps.map(cp => {
+                      const mode = schedule[cp.id]?.mode || 'always_on';
+                      return (
+                        <div key={cp.id} className="info-grid" style={{ marginBottom: 16, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
+                          <div className="info-item">
+                            <span className="info-label">Charge Point</span>
+                            <span className="info-value mono-cell">{cp.id}</span>
+                          </div>
+                          <div className="info-item">
+                            <span className="info-label">Current Mode</span>
+                            <span className="info-value">
+                              <span className={`badge ${mode === 'scheduled' ? 'badge-warn' : 'badge-on'}`}>
+                                {mode === 'scheduled' ? '⏱ Scheduled' : '🔌 Always On'}
+                              </span>
+                            </span>
+                          </div>
+                          <div className="info-item" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <button
+                              className="btn btn-primary"
+                              disabled={schedulePending || mode === 'scheduled'}
+                              onClick={() => setScheduleMode(cp.id, 'scheduled')}
+                              style={{ padding: '6px 14px' }}>
+                              Enable Schedule
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              disabled={schedulePending || mode === 'always_on'}
+                              onClick={() => setScheduleMode(cp.id, 'always_on')}
+                              style={{ padding: '6px 14px' }}>
+                              Always On
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
+                      <strong>Scheduled:</strong> 20A (full speed) from 12:00 AM – 4:00 PM | 6A (minimum) from 4:00 PM – 12:00 AM
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </>
