@@ -585,15 +585,13 @@ async def handle_schedule_post(request):
             result = None
             # StarCharge may reject certain formats — try multiple
             formats = [
-                # Format 1: Recurring Daily with start_schedule + duration
+                # Format 1: TxProfile (not TxDefaultProfile)
                 {
                     "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
+                    "charging_profile_purpose": "TxProfile",
                     "charging_profile_kind": "Recurring",
                     "recurrency_kind": "Daily",
                     "charging_schedule": {
-                        "duration": 86400,
-                        "start_schedule": "2026-01-01T00:00:00Z",
                         "charging_rate_unit": "A",
                         "charging_schedule_period": [
                             {"start_period": 0, "limit": 20.0},
@@ -601,11 +599,26 @@ async def handle_schedule_post(request):
                         ],
                     },
                 },
-                # Format 2: Absolute with start/end
+                # Format 2: ChargePointMaxProfile
+                {
+                    "charging_profile_id": 1, "stack_level": 0,
+                    "charging_profile_purpose": "ChargePointMaxProfile",
+                    "charging_profile_kind": "Recurring",
+                    "recurrency_kind": "Daily",
+                    "charging_schedule": {
+                        "charging_rate_unit": "A",
+                        "charging_schedule_period": [
+                            {"start_period": 0, "limit": 20.0},
+                            {"start_period": 57600, "limit": 6.0},
+                        ],
+                    },
+                },
+                # Format 3: TxDefaultProfile with validFrom/validTo
                 {
                     "charging_profile_id": 1, "stack_level": 0,
                     "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Absolute",
+                    "charging_profile_kind": "Recurring",
+                    "recurrency_kind": "Daily",
                     "valid_from": "2026-01-01T00:00:00Z",
                     "valid_to": "2036-01-01T00:00:00Z",
                     "charging_schedule": {
@@ -618,54 +631,8 @@ async def handle_schedule_post(request):
                         ],
                     },
                 },
-                # Format 3: Recurring Daily, connector 1
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "charging_schedule": {
-                        "duration": 86400,
-                        "start_schedule": "2026-01-01T00:00:00Z",
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                            {"start_period": 57600, "limit": 6.0},
-                        ],
-                    },
-                },
-                # Format 4: Recurring Daily, single period (20A always)
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "charging_schedule": {
-                        "duration": 86400,
-                        "start_schedule": "2026-01-01T00:00:00Z",
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                        ],
-                    },
-                },
-                # Format 5: Simple, minimal
-                {
-                    "charging_profile_id": 1, "stack_level": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "charging_profile_kind": "Recurring",
-                    "recurrency_kind": "Daily",
-                    "charging_schedule": {
-                        "charging_rate_unit": "A",
-                        "charging_schedule_period": [
-                            {"start_period": 0, "limit": 20.0},
-                            {"start_period": 57600, "limit": 6.0},
-                        ],
-                    },
-                },
             ]
             for i, profile in enumerate(formats):
-                connector = 1 if i == 2 else 0  # Format 3 uses connector 1
                 try:
                     call_result = await cp.call(SetChargingProfile(
                         connector_id=connector,
