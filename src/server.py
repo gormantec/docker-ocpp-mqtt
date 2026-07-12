@@ -39,6 +39,7 @@ from ocpp.v16.enums import (
     ClearCacheStatus,
     TriggerMessageStatus,
 )
+from ocpp.v16 import call_result as ocpp_result
 
 # Shared MQTT helpers (same pattern as other docker-iot containers)
 from mqtt_connect import build_mqtt_context
@@ -156,18 +157,20 @@ class MqttChargePoint(BaseChargePoint):
         _record_event(cp_id, "boot_notification",
                       f"vendor={charge_point_vendor} model={charge_point_model}")
         await _mqtt_publish(_cp_topic(cp_id, "boot_notification"), payload)
-        return {
-            "current_time": datetime.now(timezone.utc).isoformat(),
-            "interval": 300,
-            "status": RegistrationStatus.accepted,
-        }
+        return ocpp_result.BootNotification(
+            current_time=datetime.now(timezone.utc).isoformat(),
+            interval=300,
+            status=RegistrationStatus.accepted,
+        )
 
     @on("Heartbeat")
     async def on_heartbeat(self, **kwargs):
         _LOGGER.debug("Heartbeat from %s", self.id)
         _record_event(self.id, "heartbeat", "")
         await _mqtt_publish(_cp_topic(self.id, "heartbeat"), {})
-        return {"current_time": datetime.now(timezone.utc).isoformat()}
+        return ocpp_result.Heartbeat(
+            current_time=datetime.now(timezone.utc).isoformat()
+        )
 
     @on("StatusNotification")
     async def on_status_notification(self, connector_id, error_code, status,
@@ -192,14 +195,16 @@ class MqttChargePoint(BaseChargePoint):
             "status": status, "info": info, "vendor_id": vendor_id,
         }
         await _mqtt_publish(_cp_topic(cp_id, "status_notification"), payload)
-        return {}
+        return ocpp_result.StatusNotification()
 
     @on("Authorize")
     async def on_authorize(self, id_tag, **kwargs):
         _LOGGER.info("Authorize from %s: id_tag=%s", self.id, id_tag)
         _record_event(self.id, "authorize", f"id_tag={id_tag}")
         await _mqtt_publish(_cp_topic(self.id, "authorize"), {"id_tag": id_tag})
-        return {"id_tag_info": {"status": AuthorizationStatus.accepted}}
+        return ocpp_result.Authorize(
+            id_tag_info={"status": AuthorizationStatus.accepted}
+        )
 
     @on("StartTransaction")
     async def on_start_transaction(self, connector_id, id_tag, meter_start,
@@ -217,7 +222,10 @@ class MqttChargePoint(BaseChargePoint):
             "reservation_id": reservation_id,
         }
         await _mqtt_publish(_cp_topic(self.id, "start_transaction"), payload)
-        return {"transaction_id": 1, "id_tag_info": {"status": AuthorizationStatus.accepted}}
+        return ocpp_result.StartTransaction(
+            transaction_id=1,
+            id_tag_info={"status": AuthorizationStatus.accepted},
+        )
 
     @on("StopTransaction")
     async def on_stop_transaction(self, meter_stop, timestamp, transaction_id,
@@ -234,14 +242,16 @@ class MqttChargePoint(BaseChargePoint):
             "transaction_id": transaction_id, "reason": reason, "id_tag": id_tag,
         }
         await _mqtt_publish(_cp_topic(self.id, "stop_transaction"), payload)
-        return {"id_tag_info": {"status": AuthorizationStatus.accepted}}
+        return ocpp_result.StopTransaction(
+            id_tag_info={"status": AuthorizationStatus.accepted}
+        )
 
     @on("MeterValues")
     async def on_meter_values(self, connector_id, meter_value, **kwargs):
         _LOGGER.debug("MeterValues from %s: connector=%s", self.id, connector_id)
         payload = {"connector_id": connector_id, "meter_value": meter_value}
         await _mqtt_publish(_cp_topic(self.id, "meter_values"), payload)
-        return {}
+        return ocpp_result.MeterValues()
 
     @on("DataTransfer")
     async def on_data_transfer(self, vendor_id, message_id=None, data=None, **kwargs):
@@ -250,21 +260,21 @@ class MqttChargePoint(BaseChargePoint):
                       f"vendor={vendor_id} msg={message_id}")
         payload = {"vendor_id": vendor_id, "message_id": message_id, "data": data}
         await _mqtt_publish(_cp_topic(self.id, "data_transfer"), payload)
-        return {"status": "Accepted"}
+        return ocpp_result.DataTransfer(status="Accepted")
 
     @on("FirmwareStatusNotification")
     async def on_firmware_status_notification(self, status, **kwargs):
         _LOGGER.info("FirmwareStatus from %s: %s", self.id, status)
         _record_event(self.id, "firmware_status", f"status={status}")
         await _mqtt_publish(_cp_topic(self.id, "firmware_status"), {"status": status})
-        return {}
+        return ocpp_result.FirmwareStatusNotification()
 
     @on("DiagnosticsStatusNotification")
     async def on_diagnostics_status_notification(self, status, **kwargs):
         _LOGGER.info("DiagnosticsStatus from %s: %s", self.id, status)
         _record_event(self.id, "diagnostics_status", f"status={status}")
         await _mqtt_publish(_cp_topic(self.id, "diagnostics_status"), {"status": status})
-        return {}
+        return ocpp_result.DiagnosticsStatusNotification()
 
     # ---- Disconnection ----
 
