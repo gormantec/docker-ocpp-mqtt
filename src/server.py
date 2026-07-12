@@ -503,7 +503,7 @@ async def handle_health(request):
 
 
 async def handle_index(request):
-    ui_dist = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
+    ui_dist = os.path.join(os.path.dirname(__file__), "ui", "dist")
     index_path = os.path.join(ui_dist, "index.html")
     if os.path.exists(index_path):
         return web.FileResponse(index_path)
@@ -532,7 +532,7 @@ async def main():
     app.router.add_get("/{prefix}/{cp_id}", ocpp_ws_handler)
 
     # Static UI
-    ui_dist = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
+    ui_dist = os.path.join(os.path.dirname(__file__), "ui", "dist")
     if os.path.exists(ui_dist):
         assets_dir = os.path.join(ui_dist, "assets")
         if os.path.exists(assets_dir):
