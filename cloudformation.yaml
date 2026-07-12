@@ -117,8 +117,8 @@ Resources:
       Priority: 10
       Actions:
         - Type: forward
-          TargetService: docker-ocpp-mqtt
-          TargetPort: 9094
+          TargetService: ecs-docker-ocpp-mqtt
+          TargetPort: 9000
 Outputs:
   LogGroup:
     Description: CloudWatch Log Group for container logs

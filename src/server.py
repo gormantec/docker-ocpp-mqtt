@@ -523,14 +523,13 @@ async def main():
 
     app = web.Application()
 
-    # OCPP WebSocket endpoints
-    # Match /{charge_point_id} or /{anything}/{charge_point_id}
-    app.router.add_get("/{cp_id}", ocpp_ws_handler)
-    app.router.add_get("/{prefix}/{cp_id}", ocpp_ws_handler)
-
-    # API routes
+    # API routes (must be BEFORE wildcard OCPP routes)
     app.router.add_get("/debug", handle_debug)
     app.router.add_get("/health", handle_health)
+
+    # OCPP WebSocket endpoints
+    app.router.add_get("/{cp_id}", ocpp_ws_handler)
+    app.router.add_get("/{prefix}/{cp_id}", ocpp_ws_handler)
 
     # Static UI
     ui_dist = os.path.join(os.path.dirname(__file__), "..", "ui", "dist")
