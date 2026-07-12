@@ -94,9 +94,32 @@ Resources:
             - Name: UI_PORT
               Value:
                 Ref: UI_PORT
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref OcppMqttLogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: ocpp
+      _restartPolicy: unless-stopped
+  OcppMqttService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: docker-ocpp-mqtt
+      TaskDefinition: !Ref OcppMqttTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      PlacementConstraints:
+        - Expression: "node.role == manager"
+      NetworkAlias: ecs-docker-ocpp-mqtt
+  OcppMqttWebapp:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: webapp
+      PathPattern: /webapp/ocpp-mqtt/*
+      Priority: 10
+      Actions:
+        - Type: forward
+          TargetService: docker-ocpp-mqtt
+          TargetPort: 9094
+Outputs:
+  LogGroup:
+    Description: CloudWatch Log Group for container logs
+    Value: /ecs/ocpp-mqtt
