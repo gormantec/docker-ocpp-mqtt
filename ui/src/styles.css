@@ -1,0 +1,323 @@
+/* ============================================================
+   OCPP MQTT Bridge — AWS Console Theme
+   ============================================================ */
+
+:root {
+  --aws-navbar-bg: #232F3E;
+  --aws-navbar-text: #FFFFFF;
+  --aws-bg: #F0F2F3;
+  --aws-white: #FFFFFF;
+  --aws-border: #D5DBDB;
+  --aws-card-header-bg: #FFFFFF;
+  --aws-blue: #0073BB;
+  --aws-red: #D13212;
+  --aws-yellow: #FF9900;
+  --aws-green: #0A7D4C;
+  --aws-text: #16191F;
+  --aws-text-secondary: #545B64;
+  --aws-table-header-bg: #F0F2F3;
+  --aws-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --aws-shadow: 0 1px 2px rgba(0,0,0,0.08);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--aws-font);
+  background-color: var(--aws-bg);
+  color: var(--aws-text);
+  line-height: 1.5;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== Nav ===== */
+.aws-navbar {
+  background-color: var(--aws-navbar-bg);
+  color: var(--aws-navbar-text);
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.aws-navbar .navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.aws-navbar .brand-divider {
+  color: rgba(255,255,255,0.3);
+  font-weight: 300;
+  font-size: 20px;
+}
+
+.brand-icon { font-size: 18px; }
+
+.navbar-refresh {
+  font-size: 12px;
+  color: rgba(255,255,255,0.7);
+}
+
+/* ===== Main ===== */
+.main-content {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+/* ===== Cards ===== */
+.card {
+  background: var(--aws-white);
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  margin-bottom: 20px;
+  box-shadow: var(--aws-shadow);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--aws-border);
+  background: var(--aws-card-header-bg);
+}
+
+.card-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card-body {
+  padding: 16px;
+}
+
+/* ===== Summary Cards ===== */
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.summary-card {
+  background: var(--aws-white);
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  padding: 20px;
+  text-align: center;
+  box-shadow: var(--aws-shadow);
+  transition: box-shadow 0.2s;
+}
+
+.summary-card.clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+
+.summary-card.clickable:hover {
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+.summary-value {
+  font-size: 32px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.summary-label {
+  font-size: 13px;
+  color: var(--aws-text-secondary);
+  font-weight: 500;
+}
+
+/* ===== Tables ===== */
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th {
+  background: var(--aws-table-header-bg);
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--aws-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-bottom: 2px solid var(--aws-border);
+}
+
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--aws-border);
+  vertical-align: middle;
+}
+
+.data-table tbody tr:hover {
+  background: #F8F9FA;
+}
+
+.date-cell {
+  font-size: 12px;
+  color: var(--aws-text-secondary);
+}
+
+.mono-cell {
+  font-family: 'SF Mono', 'Source Code Pro', 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+/* ===== Badges ===== */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.badge-on { background: #E6F4EA; color: var(--aws-green); }
+.badge-off { background: #FCE8E4; color: var(--aws-red); }
+.badge-warn { background: #FFF3E0; color: #E67A00; }
+.badge-neutral { background: #E8EAED; color: var(--aws-text-secondary); }
+
+/* ===== Utility ===== */
+.text-green { color: var(--aws-green); }
+.text-red { color: var(--aws-red); }
+.text-warn { color: #E67A00; }
+.text-secondary { color: var(--aws-text-secondary); }
+
+/* ===== Loader ===== */
+.loader {
+  text-align: center;
+  padding: 60px 0;
+  color: var(--aws-text-secondary);
+  font-size: 16px;
+}
+
+/* ===== Error ===== */
+.error-card {
+  background: #FFF7F7;
+  border: 1px solid #FFD2D2;
+  border-radius: 4px;
+  padding: 24px;
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.error-card h3 {
+  color: var(--aws-red);
+  margin-bottom: 8px;
+}
+
+.error-card p { color: var(--aws-text-secondary); }
+
+.hint {
+  font-size: 12px;
+  color: var(--aws-text-secondary);
+  margin-top: 4px;
+}
+
+.hint code {
+  background: #E8EAED;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Source Code Pro', monospace;
+  font-size: 11px;
+}
+
+/* ===== Empty State ===== */
+.empty-state {
+  text-align: center;
+  padding: 40px 16px;
+  color: var(--aws-text-secondary);
+}
+
+.empty-state p { margin-bottom: 8px; }
+
+/* ===== Info Grid ===== */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-label {
+  font-size: 11px;
+  color: var(--aws-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  font-weight: 600;
+}
+
+.info-value {
+  font-size: 13px;
+  color: var(--aws-text);
+}
+
+/* ===== Status Dot ===== */
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* ===== Override Styles ===== */
+.override-active {
+  border-color: var(--aws-yellow);
+  box-shadow: 0 0 0 1px var(--aws-yellow);
+}
+
+.override-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.override-led {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--aws-yellow);
+  box-shadow: 0 0 4px var(--aws-yellow);
+}
+
+.override-expiry {
+  font-size: 11px;
+  color: #E67A00;
+  margin-top: 4px;
+}
+
+.summary-card {
+  position: relative;
+}

@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: OCPP-to-MQTT Bridge — Infrastructure (Networking)
+Metadata: {}
+Parameters:
+  MQTT_CA_CERT_B64:
+    Type: String
+    Default: '{{resolve:secretsmanager:gormantec.com/MQTT_CA_CERT_B64:SecretString}}'
+    NoEcho: true
+  MQTT_CLIENT_CERT_B64:
+    Type: String
+    Default: '{{resolve:secretsmanager:gormantec.com/MQTT_CLIENT_CERT_B64:SecretString}}'
+    NoEcho: true
+  MQTT_CLIENT_KEY_B64:
+    Type: String
+    Default: '{{resolve:secretsmanager:gormantec.com/MQTT_CLIENT_KEY_B64:SecretString}}'
+    NoEcho: true
+  MQTT_BROKER:
+    Type: String
+    Default: docker-iot_server
+  MQTT_PORT:
+    Type: String
+    Default: '8883'
+  MQTT_TRANSPORT:
+    Type: String
+    Default: tcp
+  MQTT_THING_NAME:
+    Type: String
+    Default: gormantec-ocpp-bridge
+  OCPP_HOST:
+    Type: String
+    Default: 0.0.0.0
+  OCPP_PORT:
+    Type: String
+    Default: '9000'
+  OCPP_WS_PATH:
+    Type: String
+    Default: '/{charge_point_id}'
+  UI_PORT:
+    Type: String
+    Default: '9094'
+Resources:
+  OcppMqttLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/ocpp-mqtt
+      RetentionInDays: 30
+  OcppMqttTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      IoTCoreLite:
+        _injectFromCompose: true
+    Properties:
+      Family: ocpp-mqtt
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: bridge
+      ContainerDefinitions:
+        - Name: ocpp-mqtt
+          Image: PLACEHOLDER
+          PortMappings:
+            - ContainerPort: "9000"
+            - ContainerPort: "9094"
+          Environment:
+            - Name: MQTT_BROKER
+              Value:
+                Ref: MQTT_BROKER
+            - Name: MQTT_PORT
+              Value:
+                Ref: MQTT_PORT
+            - Name: MQTT_TRANSPORT
+              Value:
+                Ref: MQTT_TRANSPORT
+            - Name: MQTT_THING_NAME
+              Value:
+                Ref: MQTT_THING_NAME
+            - Name: MQTT_CA_CERT_B64
+              Value:
+                Ref: MQTT_CA_CERT_B64
+            - Name: MQTT_CLIENT_CERT_B64
+              Value:
+                Ref: MQTT_CLIENT_CERT_B64
+            - Name: MQTT_CLIENT_KEY_B64
+              Value:
+                Ref: MQTT_CLIENT_KEY_B64
+            - Name: OCPP_HOST
+              Value:
+                Ref: OCPP_HOST
+            - Name: OCPP_PORT
+              Value:
+                Ref: OCPP_PORT
+            - Name: OCPP_WS_PATH
+              Value:
+                Ref: OCPP_WS_PATH
+            - Name: UI_PORT
+              Value:
+                Ref: UI_PORT
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OcppMqttLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ocpp

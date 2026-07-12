@@ -1,0 +1,14 @@
+{
+  "name": "docker-ocpp-mqtt",
+  "private": true,
+  "scripts": {
+    "stack:create": "iot cloudformation create-stack --stack-name ecs-ocpp-mqtt --template-file cloudformation.yaml",
+    "stack:recreate": "iot cloudformation delete-stack --stack-name ecs-ocpp-mqtt && echo 'wait 10sec' && sleep 10 && iot cloudformation create-stack --stack-name ecs-ocpp-mqtt --template-file cloudformation.yaml",
+    "build:image": "iot build start --push --no-deploy --read-env",
+    "build:image-force": "iot build start --push --recreate --follow --read-env --sync-secrets",
+    "build:push": "docker build -t ghcr.io/gormantec/docker-ocpp-mqtt:latest . && docker push ghcr.io/gormantec/docker-ocpp-mqtt:latest"
+  },
+  "devDependencies": {
+    "@gormantec/iot-cli": "^1.0.23"
+  }
+}
