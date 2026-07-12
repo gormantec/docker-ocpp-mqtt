@@ -22,6 +22,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from collections import deque
 
 from aiohttp import web, WSMsgType
@@ -52,6 +53,26 @@ from mqtt_connect import build_mqtt_context
 
 logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
+
+SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+
+# ---------------------------------------------------------------------------
+# Schedule helper
+# ---------------------------------------------------------------------------
+
+def _is_charging_allowed(cp_id: str) -> bool:
+    """Check if charging is currently allowed for this charge point.
+    
+    always_on mode → always True.
+    scheduled mode → True only during 12am-4pm Sydney time (peak).
+    """
+    state = _schedule_state.get(cp_id, {}).get("mode", "always_on")
+    if state != "scheduled":
+        return True
+    now_syd = datetime.now(SYDNEY_TZ)
+    hour = now_syd.hour
+    # 12am (0) to 4pm (15:59) = allowed, 4pm (16) to 12am (23:59) = blocked
+    return hour < 16
 
 # ---------------------------------------------------------------------------
 # Safe env helpers
@@ -208,9 +229,15 @@ class MqttChargePoint(BaseChargePoint):
         _LOGGER.info("Authorize from %s: id_tag=%s", self.id, id_tag)
         _record_event(self.id, "authorize", f"id_tag={id_tag}")
         await _mqtt_publish(_cp_topic(self.id, "authorize"), {"id_tag": id_tag})
-        return ocpp_result.Authorize(
-            id_tag_info={"status": AuthorizationStatus.accepted}
-        )
+        if _is_charging_allowed(self.id):
+            return ocpp_result.Authorize(
+                id_tag_info={"status": AuthorizationStatus.accepted}
+            )
+        else:
+            _LOGGER.info("Rejecting authorize for %s — scheduled off-peak", self.id)
+            return ocpp_result.Authorize(
+                id_tag_info={"status": AuthorizationStatus.invalid}
+            )
 
     @on("StartTransaction")
     async def on_start_transaction(self, connector_id, id_tag, meter_start,
