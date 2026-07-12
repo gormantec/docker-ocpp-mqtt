@@ -582,9 +582,11 @@ async def handle_schedule_post(request):
 
         else:
             _LOGGER.info("Setting scheduled profile for %s", cp_id)
-            result = await cp.call(SetChargingProfile(
-                connector_id=0,
-                cs_charging_profiles={
+            result = None
+            # StarCharge may reject certain formats — try multiple
+            formats = [
+                # Format 1: Recurring Daily (standard)
+                {
                     "charging_profile_id": 1, "stack_level": 0,
                     "charging_profile_purpose": "TxDefaultProfile",
                     "charging_profile_kind": "Recurring",
@@ -597,7 +599,43 @@ async def handle_schedule_post(request):
                         ],
                     },
                 },
-            ))
+                # Format 2: Absolute (no recurrency)
+                {
+                    "charging_profile_id": 1, "stack_level": 0,
+                    "charging_profile_purpose": "TxDefaultProfile",
+                    "charging_profile_kind": "Absolute",
+                    "charging_schedule": {
+                        "charging_rate_unit": "A",
+                        "charging_schedule_period": [
+                            {"start_period": 0, "limit": 20.0},
+                            {"start_period": 57600, "limit": 6.0},
+                        ],
+                    },
+                },
+                # Format 3: Relative
+                {
+                    "charging_profile_id": 1, "stack_level": 0,
+                    "charging_profile_purpose": "TxDefaultProfile",
+                    "charging_profile_kind": "Relative",
+                    "charging_schedule": {
+                        "charging_rate_unit": "A",
+                        "charging_schedule_period": [
+                            {"start_period": 0, "limit": 20.0},
+                            {"start_period": 57600, "limit": 6.0},
+                        ],
+                    },
+                },
+            ]
+            for i, profile in enumerate(formats):
+                try:
+                    result = await cp.call(SetChargingProfile(
+                        connector_id=0,
+                        cs_charging_profiles=profile,
+                    ))
+                    _LOGGER.info("Format %d ACCEPTED!", i + 1)
+                    break
+                except Exception as e:
+                    _LOGGER.warning("Format %d rejected: %s", i + 1, e)
 
             _schedule_state[cp_id] = {"mode": "scheduled"}
             _record_event(cp_id, "schedule", "Mode: scheduled (20A 12am-4pm, 6A 4pm-12am)")
