@@ -635,7 +635,7 @@ async def handle_schedule_post(request):
             for i, profile in enumerate(formats):
                 try:
                     call_result = await cp.call(SetChargingProfile(
-                        connector_id=connector,
+                        connector_id=0,
                         cs_charging_profiles=profile,
                     ))
                     status = getattr(call_result, "status", str(call_result))
