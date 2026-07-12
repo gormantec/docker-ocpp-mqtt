@@ -40,6 +40,12 @@ from ocpp.v16.enums import (
     TriggerMessageStatus,
 )
 from ocpp.v16 import call_result as ocpp_result
+from ocpp.v16.call import (
+    RemoteStartTransaction, RemoteStopTransaction, Reset, UnlockConnector,
+    GetConfiguration, ChangeConfiguration, ClearCache, TriggerMessage,
+    GetDiagnostics, UpdateFirmware, ChangeAvailability, GetLocalListVersion,
+    SendLocalList, SetChargingProfile, ClearChargingProfile,
+)
 
 # Shared MQTT helpers (same pattern as other docker-iot containers)
 from mqtt_connect import build_mqtt_context
@@ -375,78 +381,78 @@ async def _handle_mqtt_command(cp_id: str, payload: bytes):
 
         # All OCPP v1.6 Central System → Charge Point actions
         if action == "RemoteStartTransaction":
-            result = await cp.call({
-                "id_tag": params.get("id_tag", ""),
-                "connector_id": params.get("connector_id"),
-            }, action="RemoteStartTransaction")
+            result = await cp.call(RemoteStartTransaction(
+                id_tag=params.get("id_tag", ""),
+                connector_id=params.get("connector_id"),
+            ))
         elif action == "RemoteStopTransaction":
-            result = await cp.call({
-                "transaction_id": params.get("transaction_id", 1),
-            }, action="RemoteStopTransaction")
+            result = await cp.call(RemoteStopTransaction(
+                transaction_id=params.get("transaction_id", 1),
+            ))
         elif action == "Reset":
-            result = await cp.call({
-                "type": params.get("type", "Soft"),
-            }, action="Reset")
+            result = await cp.call(Reset(
+                type=params.get("type", "Soft"),
+            ))
         elif action == "UnlockConnector":
-            result = await cp.call({
-                "connector_id": params.get("connector_id", 0),
-            }, action="UnlockConnector")
+            result = await cp.call(UnlockConnector(
+                connector_id=params.get("connector_id", 0),
+            ))
         elif action == "GetConfiguration":
             keys = params.get("key", [])
-            result = await cp.call({"key": keys}, action="GetConfiguration")
+            result = await cp.call(GetConfiguration(key=keys))
         elif action == "ChangeConfiguration":
-            result = await cp.call({
-                "key": params.get("key", ""),
-                "value": params.get("value", ""),
-            }, action="ChangeConfiguration")
+            result = await cp.call(ChangeConfiguration(
+                key=params.get("key", ""),
+                value=params.get("value", ""),
+            ))
         elif action == "ClearCache":
-            result = await cp.call({}, action="ClearCache")
+            result = await cp.call(ClearCache())
         elif action == "TriggerMessage":
-            result = await cp.call({
-                "requested_message": params.get("requested_message", ""),
-                "connector_id": params.get("connector_id"),
-            }, action="TriggerMessage")
+            result = await cp.call(TriggerMessage(
+                requested_message=params.get("requested_message", ""),
+                connector_id=params.get("connector_id"),
+            ))
         elif action == "GetDiagnostics":
-            result = await cp.call({
-                "location": params.get("location", ""),
-                "retries": params.get("retries", 1),
-                "retry_interval": params.get("retry_interval", 60),
-                "start_time": params.get("start_time"),
-                "stop_time": params.get("stop_time"),
-            }, action="GetDiagnostics")
+            result = await cp.call(GetDiagnostics(
+                location=params.get("location", ""),
+                retries=params.get("retries", 1),
+                retry_interval=params.get("retry_interval", 60),
+                start_time=params.get("start_time"),
+                stop_time=params.get("stop_time"),
+            ))
         elif action == "UpdateFirmware":
-            result = await cp.call({
-                "location": params.get("location", ""),
-                "retrieve_date": params.get("retrieve_date", datetime.now(timezone.utc).isoformat()),
-                "retries": params.get("retries", 1),
-                "retry_interval": params.get("retry_interval", 60),
-            }, action="UpdateFirmware")
+            result = await cp.call(UpdateFirmware(
+                location=params.get("location", ""),
+                retrieve_date=params.get("retrieve_date", datetime.now(timezone.utc).isoformat()),
+                retries=params.get("retries", 1),
+                retry_interval=params.get("retry_interval", 60),
+            ))
         elif action == "ChangeAvailability":
-            result = await cp.call({
-                "connector_id": params.get("connector_id", 0),
-                "type": params.get("type", "Operative"),
-            }, action="ChangeAvailability")
+            result = await cp.call(ChangeAvailability(
+                connector_id=params.get("connector_id", 0),
+                type=params.get("type", "Operative"),
+            ))
         elif action == "GetLocalListVersion":
-            result = await cp.call({}, action="GetLocalListVersion")
+            result = await cp.call(GetLocalListVersion())
         elif action == "SendLocalList":
-            result = await cp.call({
-                "list_version": params.get("list_version", 0),
-                "update_type": params.get("update_type", "Full"),
-                "local_authorization_list": params.get("local_authorization_list", []),
-            }, action="SendLocalList")
+            result = await cp.call(SendLocalList(
+                list_version=params.get("list_version", 0),
+                update_type=params.get("update_type", "Full"),
+                local_authorization_list=params.get("local_authorization_list", []),
+            ))
         elif action == "SetChargingProfile":
             cs_profiles = params.get("cs_charging_profiles", params)
-            result = await cp.call({
-                "connector_id": params.get("connector_id", 0),
-                "cs_charging_profiles": cs_profiles,
-            }, action="SetChargingProfile")
+            result = await cp.call(SetChargingProfile(
+                connector_id=params.get("connector_id", 0),
+                cs_charging_profiles=cs_profiles,
+            ))
         elif action == "ClearChargingProfile":
-            result = await cp.call({
-                "id": params.get("id"),
-                "connector_id": params.get("connector_id", 0),
-                "charging_profile_purpose": params.get("charging_profile_purpose"),
-                "stack_level": params.get("stack_level"),
-            }, action="ClearChargingProfile")
+            result = await cp.call(ClearChargingProfile(
+                id=params.get("id"),
+                connector_id=params.get("connector_id", 0),
+                charging_profile_purpose=params.get("charging_profile_purpose"),
+                stack_level=params.get("stack_level"),
+            ))
         else:
             _LOGGER.warning("Unknown MQTT command action: %s", action)
             return
@@ -548,16 +554,16 @@ async def handle_schedule_post(request):
         if mode == "always_on":
             _LOGGER.info("Clearing charging profile for %s", cp_id)
             try:
-                result = await cp.call({
-                    "id": 1, "connector_id": 0,
-                    "charging_profile_purpose": "TxDefaultProfile",
-                    "stack_level": 0,
-                }, action="ClearChargingProfile")
+                result = await cp.call(ClearChargingProfile(
+                    id=1, connector_id=0,
+                    charging_profile_purpose="TxDefaultProfile",
+                    stack_level=0,
+                ))
             except Exception as e:
                 _LOGGER.warning("ClearChargingProfile failed, falling back to 20A flat: %s", e)
-                result = await cp.call({
-                    "connector_id": 0,
-                    "cs_charging_profiles": {
+                result = await cp.call(SetChargingProfile(
+                    connector_id=0,
+                    cs_charging_profiles={
                         "charging_profile_id": 1, "stack_level": 0,
                         "charging_profile_purpose": "TxDefaultProfile",
                         "charging_profile_kind": "Recurring",
@@ -569,16 +575,16 @@ async def handle_schedule_post(request):
                             ],
                         },
                     },
-                }, action="SetChargingProfile")
+                ))
 
             _schedule_state[cp_id] = {"mode": "always_on"}
             _record_event(cp_id, "schedule", "Mode: always_on")
 
         else:
             _LOGGER.info("Setting scheduled profile for %s", cp_id)
-            result = await cp.call({
-                "connector_id": 0,
-                "cs_charging_profiles": {
+            result = await cp.call(SetChargingProfile(
+                connector_id=0,
+                cs_charging_profiles={
                     "charging_profile_id": 1, "stack_level": 0,
                     "charging_profile_purpose": "TxDefaultProfile",
                     "charging_profile_kind": "Recurring",
@@ -591,7 +597,7 @@ async def handle_schedule_post(request):
                         ],
                     },
                 },
-            }, action="SetChargingProfile")
+            ))
 
             _schedule_state[cp_id] = {"mode": "scheduled"}
             _record_event(cp_id, "schedule", "Mode: scheduled (20A 12am-4pm, 6A 4pm-12am)")
