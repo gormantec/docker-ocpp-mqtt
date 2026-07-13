@@ -219,9 +219,11 @@ class MqttChargePoint(BaseChargePoint):
         _record_event(cp_id, "status_notification", summary)
 
         if cp_id in _cp_state:
-            _cp_state[cp_id]["status"] = status
             if connector_id is not None:
                 _cp_state[cp_id]["connector_id"] = connector_id
+            # Track per-connector status
+            key = f"status_{connector_id}" if connector_id is not None else "status"
+            _cp_state[cp_id][key] = status
 
         # Car plugged in & ready — try to start if charging is allowed
         if status == "Preparing" and _is_charging_allowed(cp_id):
@@ -564,6 +566,17 @@ async def handle_debug(request):
     uptime = (now - STARTED_AT).total_seconds()
 
     charge_points = list(_cp_state.values())
+    # Compute best status across connectors
+    STATUS_RANK = {"Charging": 5, "Preparing": 4, "SuspendedEV": 3, "SuspendedEVSE": 2, "Available": 1, "Faulted": 0, "Unavailable": 0}
+    for cp in charge_points:
+        best, best_conn = "unknown", None
+        for k, v in cp.items():
+            if k.startswith("status_"):
+                conn = k.split("_", 1)[1]
+                if STATUS_RANK.get(v, -1) > STATUS_RANK.get(best, -1):
+                    best, best_conn = v, conn
+        cp["status"] = best
+        cp["connector_id"] = best_conn if best_conn else cp.get("connector_id")
     charge_points.sort(key=lambda cp: (
         not cp.get("connected", False),
         cp.get("last_event") or "",
