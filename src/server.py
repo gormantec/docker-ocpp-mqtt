@@ -21,6 +21,7 @@ import logging
 import asyncio
 import json
 import time
+import base64
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from collections import deque
@@ -55,6 +56,9 @@ logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
 
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+
+# Charger Basic auth password
+AUTH_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
 # ---------------------------------------------------------------------------
 # Schedule helper
@@ -387,14 +391,23 @@ async def ocpp_ws_handler(request: web.Request):
     """Handle an OCPP WebSocket connection from a charge point."""
     cp_id = request.match_info.get("cp_id", "unknown")
 
-    # ── Debug logging: reverse-engineer charger auth fields ──
-    _LOGGER.info("WS connect attempt — cp_id=%s | path=%s | query=%s",
-                 cp_id, request.path, request.query_string)
-    _LOGGER.info("WS headers for %s:", cp_id)
-    for name, value in request.headers.items():
-        _LOGGER.info("  %s: %s", name, value)
-    _LOGGER.info("WS subprotocols requested: %s",
-                 request.headers.get("Sec-WebSocket-Protocol", "(none)"))
+    # ── Basic auth check ──
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        _LOGGER.warning("Rejected %s — no Basic auth header", cp_id)
+        return web.json_response({"error": "Authorization required"}, status=401)
+    try:
+        creds = base64.b64decode(auth_header[6:]).decode("utf-8")
+        parts = creds.split(":", 1)
+        password = parts[1] if len(parts) > 1 else ""
+        if password != AUTH_KEY:
+            _LOGGER.warning("Rejected %s — bad auth key (got %s)", cp_id, password[:20])
+            return web.json_response({"error": "Invalid authorization"}, status=401)
+    except Exception as e:
+        _LOGGER.warning("Rejected %s — auth decode error: %s", cp_id, e)
+        return web.json_response({"error": "Invalid authorization"}, status=401)
+
+    _LOGGER.info("WS connect — cp_id=%s (authenticated)", cp_id)
 
     ws = web.WebSocketResponse(protocols=["ocpp1.6"])
     await ws.prepare(request)
