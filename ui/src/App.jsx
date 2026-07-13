@@ -170,16 +170,30 @@ export default function App() {
                       <thead>
                         <tr>
                           <th>Charge Point ID</th>
-                          <th>Status</th>
-                          <th>Connector</th>
+                          <th>Connector 1</th>
+                          <th>Connector 0</th>
+                          <th>Best Status</th>
                           <th>Connected</th>
                           <th>Last Event</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {chargePoints.map((cp) => (
+                        {chargePoints.map((cp) => {
+                          const physStatus = cp.physical_status || {};
+                          const conn1 = physStatus['1'] || '—';
+                          const conn0 = (cp.connectors || {})['0'] || '—';
+                          return (
                           <tr key={cp.id}>
                             <td className="mono-cell">{cp.id}</td>
+                            <td>
+                              <span className="status-dot" style={{
+                                backgroundColor: STATUS_COLORS[conn1] || '#545B64',
+                                display: 'inline-block', width: 10, height: 10,
+                                borderRadius: '50%', marginRight: 6
+                              }} />
+                              <strong>{conn1}</strong>
+                            </td>
+                            <td style={{color: '#95a5a6'}}>{conn0}</td>
                             <td>
                               <span className="status-dot" style={{
                                 backgroundColor: STATUS_COLORS[cp.status] || '#545B64',
@@ -188,7 +202,6 @@ export default function App() {
                               }} />
                               {cp.status || 'unknown'}
                             </td>
-                            <td>{cp.connector_id != null ? cp.connector_id : '—'}</td>
                             <td>
                               <span className={`badge ${cp.connected ? 'badge-on' : 'badge-off'}`}>
                                 {cp.connected ? 'YES' : 'NO'}
@@ -198,7 +211,7 @@ export default function App() {
                               {cp.last_event ? new Date(cp.last_event).toLocaleTimeString() : '—'}
                             </td>
                           </tr>
-                        ))}
+                        )})}
                       </tbody>
                     </table>
                   </div>
@@ -229,11 +242,23 @@ export default function App() {
                     )}
                     {connectedCps.map(cp => {
                       const mode = schedule[cp.id]?.mode || 'charge_now';
+                      const conn1Status = (cp.physical_status || {})['1'] || 'unknown';
                       return (
                         <div key={cp.id} className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
                           <div className="info-item">
                             <span className="info-label">Charge Point</span>
                             <span className="info-value mono-cell">{cp.id}</span>
+                          </div>
+                          <div className="info-item">
+                            <span className="info-label">Connector 1</span>
+                            <span className="info-value">
+                              <span className="status-dot" style={{
+                                backgroundColor: STATUS_COLORS[conn1Status] || '#545B64',
+                                display: 'inline-block', width: 10, height: 10,
+                                borderRadius: '50%', marginRight: 6, verticalAlign: 'middle'
+                              }} />
+                              {conn1Status}
+                            </span>
                           </div>
                           <div className="info-item">
                             <span className="info-label">Mode</span>

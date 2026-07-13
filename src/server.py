@@ -149,7 +149,8 @@ def _record_event(cp_id: str, event_type: str, summary: str = ""):
     _event_buffer.append(event)
     if cp_id not in _cp_state:
         _cp_state[cp_id] = {"id": cp_id, "connected": True, "status": "unknown",
-                            "connector_id": None, "last_event": None}
+                            "connector_id": None, "last_event": None,
+                            "connectors": {}}  # per-connector -> status
     _cp_state[cp_id]["last_event"] = event["time"]
 
 
@@ -171,6 +172,7 @@ class MqttChargePoint(BaseChargePoint):
         _cp_state[cp_id] = {
             "id": cp_id, "connected": True, "status": "unknown",
             "connector_id": None, "last_event": datetime.now(timezone.utc).isoformat(),
+            "connectors": {},  # per-connector -> status
         }
         _LOGGER.info("Charge point connected: %s", cp_id)
 
@@ -219,11 +221,11 @@ class MqttChargePoint(BaseChargePoint):
         _record_event(cp_id, "status_notification", summary)
 
         if cp_id in _cp_state:
+            # Track per-connector status in a clean dict
+            conn_key = str(connector_id) if connector_id is not None else "0"
+            _cp_state[cp_id]["connectors"][conn_key] = status
             if connector_id is not None:
                 _cp_state[cp_id]["connector_id"] = connector_id
-            # Track per-connector status
-            key = f"status_{connector_id}" if connector_id is not None else "status"
-            _cp_state[cp_id][key] = status
 
         # Car plugged in & ready — try to start if charging is allowed
         if status == "Preparing" and _is_charging_allowed(cp_id):
@@ -570,13 +572,13 @@ async def handle_debug(request):
     STATUS_RANK = {"Charging": 5, "Preparing": 4, "SuspendedEV": 3, "SuspendedEVSE": 2, "Available": 1, "Faulted": 0, "Unavailable": 0}
     for cp in charge_points:
         best, best_conn = "unknown", None
-        for k, v in cp.items():
-            if k.startswith("status_"):
-                conn = k.split("_", 1)[1]
-                if STATUS_RANK.get(v, -1) > STATUS_RANK.get(best, -1):
-                    best, best_conn = v, conn
+        for conn_id, conn_status in cp.get("connectors", {}).items():
+            if STATUS_RANK.get(conn_status, -1) > STATUS_RANK.get(best, -1):
+                best, best_conn = conn_status, int(conn_id)
         cp["status"] = best
-        cp["connector_id"] = best_conn if best_conn else cp.get("connector_id")
+        cp["connector_id"] = best_conn if best_conn is not None else cp.get("connector_id")
+        # Physical connector status (non-zero connectors — the actual cables)
+        cp["physical_status"] = {k: v for k, v in cp.get("connectors", {}).items() if k != "0"}
     charge_points.sort(key=lambda cp: (
         not cp.get("connected", False),
         cp.get("last_event") or "",
@@ -711,9 +713,9 @@ async def handle_schedule_post(request):
                     ),
                 ),
             ))
-            # Try to initiate charging if a car is connected (connector 1)
-            cp_status = _cp_state.get(cp_id, {}).get("status", "")
-            if cp_status in ("Available", "Preparing"):
+            # Try to initiate charging if connector 1 is ready
+            conn1_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1", "")
+            if conn1_status in ("Available", "Preparing"):
                 try:
                     # Use the last-seen id_tag (or a default)
                     await cp.call(RemoteStartTransaction(
