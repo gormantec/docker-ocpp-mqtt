@@ -219,12 +219,30 @@ class MqttChargePoint(BaseChargePoint):
             if connector_id is not None:
                 _cp_state[cp_id]["connector_id"] = connector_id
 
+        # Car plugged in & ready — try to start if charging is allowed
+        if status == "Preparing" and _is_charging_allowed(cp_id):
+            _LOGGER.info("Car detected on %s — initiating RemoteStartTransaction", cp_id)
+            asyncio.create_task(self._auto_start(cp_id))
+
         payload = {
             "connector_id": connector_id, "error_code": error_code,
             "status": status, "info": info, "vendor_id": vendor_id,
         }
         await _mqtt_publish(_cp_topic(cp_id, "status_notification"), payload)
         return ocpp_result.StatusNotification()
+
+    async def _auto_start(self, cp_id: str):
+        """Auto-start charging when a car is connected."""
+        try:
+            # Small delay to let the charger settle
+            await asyncio.sleep(1)
+            result = await self.call(RemoteStartTransaction(
+                id_tag="0000003934", connector_id=1,
+            ))
+            _LOGGER.info("RemoteStartTransaction response for %s: %s", cp_id, result)
+            _record_event(cp_id, "remote_start", f"status={getattr(result, 'status', result)}")
+        except Exception as e:
+            _LOGGER.warning("RemoteStartTransaction failed for %s: %s", cp_id, e)
 
     @on("Authorize")
     async def on_authorize(self, id_tag, **kwargs):
@@ -342,15 +360,14 @@ class _AiohttpWsAdapter:
         if msg.type == WSMsgType.TEXT:
             return msg.data
         elif msg.type == WSMsgType.BINARY:
-            # Some chargers send binary frames — decode as UTF-8
             return msg.data.decode("utf-8")
-        elif msg.type == WSMsgType.CLOSE:
+        elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED):
             raise ConnectionError("WebSocket closed")
         elif msg.type == WSMsgType.ERROR:
             raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
         else:
             _LOGGER.warning("Unexpected WS message type: %s, ignoring", msg.type)
-            return await self.recv()  # skip and try next
+            return await self.recv()
 
     async def send(self, data: str):
         await self._ws.send_str(data)
