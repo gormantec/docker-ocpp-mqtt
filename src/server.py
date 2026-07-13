@@ -65,20 +65,27 @@ AUTH_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 # ---------------------------------------------------------------------------
 
 def _is_charging_allowed(cp_id: str) -> bool:
-    """Check if charging is currently allowed.
+    """Check if charging is currently allowed (Sydney timezone).
     
-    stop   → always False (terminate + deny all).
-    auto   → True 12am-4pm Sydney, False 4pm-12am.
+    stop       → always False (terminate + deny all).
+    auto       → True during peak hours, False during off-peak.
     charge_now → always True.
     """
-    state = _schedule_state.get(cp_id, {}).get("mode", "charge_now")
-    if state == "stop":
+    config = _get_schedule(cp_id)
+    mode = config.get("mode", "charge_now")
+    if mode == "stop":
         return False
-    if state == "charge_now":
+    if mode == "charge_now":
         return True
-    # auto (scheduled)
+    # auto (scheduled) — use per-CP peak hours
     now_syd = datetime.now(SYDNEY_TZ)
-    return now_syd.hour < 16
+    peak_start = config.get("peak_start_hour", 0)
+    peak_end = config.get("peak_end_hour", 16)
+    if peak_start <= peak_end:
+        return peak_start <= now_syd.hour < peak_end
+    else:
+        # overnight wrap (e.g., 22:00–06:00)
+        return now_syd.hour >= peak_start or now_syd.hour < peak_end
 
 # ---------------------------------------------------------------------------
 # Safe env helpers
@@ -109,6 +116,17 @@ OCPP_PORT = _env_int("OCPP_PORT", 9000)
 UI_PORT = _env_int("UI_PORT", 9094)
 MQTT_THING_NAME = _env_str("MQTT_THING_NAME", "gormantec-ocpp-bridge")
 MQTT_BROKER_VAR = _env_str("MQTT_BROKER", "docker-iot_server")
+
+# DocumentDB / CouchDB persistence
+DOCDB_URL = _env_str("DOCDB_URL", "")
+DOCDB_USER = _env_str("DOCDB_USER", "admin")
+DOCDB_PASSWORD = _env_str("DOCDB_PASSWORD", "password")
+DOCDB_ENABLED = bool(DOCDB_URL)
+DOCDB_DB = "ocpp_mqtt"
+
+def _docdb_key(cp_id: str, doc_type: str) -> str:
+    """Build a namespaced DocumentDB key: {cp_id}:{type}"""
+    return f"{cp_id}:{doc_type}"
 
 # Service start timestamp
 STARTED_AT = datetime.now(timezone.utc)
@@ -620,9 +638,119 @@ _schedule_state: dict[str, dict] = {}
 # Track active transaction IDs per CP for RemoteStopTransaction
 _tx_ids: dict[str, int] = {}
 
+# Per-CP schedule config (persisted to DocumentDB)
+# {cp_id: {mode, peak_start_hour, peak_end_hour, peak_watts, off_peak_watts}}
+_schedule_configs: dict[str, dict] = {}
+
+# Default schedule config
+DEFAULT_SCHEDULE = {
+    "mode": "charge_now",
+    "peak_start_hour": 0,
+    "peak_end_hour": 16,
+    "peak_watts": 4800.0,
+    "off_peak_watts": 1440.0,
+}
+
+
+# ---------------------------------------------------------------------------
+# DocumentDB / CouchDB persistence (via aiohttp)
+# ---------------------------------------------------------------------------
+
+async def _docdb_request(method: str, path: str, body: dict = None):
+    """Make a CouchDB REST API call. Returns (ok: bool, data: dict)."""
+    if not DOCDB_ENABLED:
+        return False, {}
+    url = f"{DOCDB_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        import aiohttp as _aiohttp
+        auth = None
+        if DOCDB_USER:
+            from aiohttp import BasicAuth
+            auth = BasicAuth(DOCDB_USER, DOCDB_PASSWORD)
+        async with _aiohttp.ClientSession(auth=auth) as sess:
+            if body is not None:
+                async with sess.request(method, url, json=body) as resp:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text) if text else {}
+                    except json.JSONDecodeError:
+                        data = {"_raw": text}
+                    return resp.status < 400, data
+            else:
+                async with sess.request(method, url) as resp:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text) if text else {}
+                    except json.JSONDecodeError:
+                        data = {"_raw": text}
+                    return resp.status < 400, data
+    except Exception as e:
+        _LOGGER.warning("DocDB request failed (%s %s): %s", method, path, e)
+        return False, {}
+
+
+async def _docdb_ensure_db():
+    """Ensure the schedules database exists (idempotent)."""
+    if not DOCDB_ENABLED:
+        return
+    ok, _ = await _docdb_request("PUT", DOCDB_DB)
+    if ok:
+        _LOGGER.info("DocDB database '%s' ready", DOCDB_DB)
+    else:
+        _LOGGER.info("DocDB database '%s' already exists", DOCDB_DB)
+
+
+async def _docdb_save_schedule(cp_id: str):
+    """Persist a charge point's schedule config to DocumentDB."""
+    if not DOCDB_ENABLED:
+        return
+    config = _schedule_configs.get(cp_id, DEFAULT_SCHEDULE)
+    doc = {"_id": _docdb_key(cp_id, "schedule"), "cp_id": cp_id, **config}
+    ok, _ = await _docdb_request("PUT", f"{DOCDB_DB}/{doc['_id']}", doc)
+    if ok:
+        _LOGGER.info("Saved schedule for %s to DocDB: mode=%s", cp_id, config.get("mode"))
+
+
+async def _docdb_load_schedules():
+    """Load all persisted schedule configs from DocumentDB."""
+    if not DOCDB_ENABLED:
+        return
+    ok, data = await _docdb_request("GET", f"{DOCDB_DB}/_all_docs?include_docs=true")
+    if not ok:
+        _LOGGER.warning("Failed to load schedules from DocDB")
+        return
+    rows = data.get("rows", [])
+    loaded = 0
+    for row in rows:
+        doc = row.get("doc", {})
+        doc_id = doc.get("_id", "")
+        if doc_id.startswith("_"):
+            continue
+        # Only load schedule docs
+        if not doc_id.endswith(":schedule"):
+            continue
+        cp_id = doc.get("cp_id", "")
+        if not cp_id:
+            continue
+        config = {k: v for k, v in doc.items() if not k.startswith("_") and k != "cp_id"}
+        if "mode" in config:
+            _schedule_configs[cp_id] = {**DEFAULT_SCHEDULE, **config}
+            loaded += 1
+    if loaded:
+        _LOGGER.info("Loaded %d schedule config(s) from DocDB", loaded)
+    else:
+        _LOGGER.info("No existing schedule configs in DocDB")
+
+
+def _get_schedule(cp_id: str) -> dict:
+    """Get schedule config for a charge point (defaults if unknown)."""
+    return _schedule_configs.get(cp_id, dict(DEFAULT_SCHEDULE))
+
 async def handle_schedule_post(request):
-    """POST /schedule — Set charging mode.
-    Body: {"cp_id": "4b8609", "mode": "stop"|"auto"|"charge_now"}
+    """POST /schedule — Set charging mode per charge point.
+    Body: {"cp_id": "4b8609", "mode": "stop"|"auto"|"charge_now",
+           "peak_watts": 4800, "off_peak_watts": 1440,
+           "peak_start_hour": 0, "peak_end_hour": 16}
     """
     try:
         body = await request.json()
@@ -636,26 +764,43 @@ async def handle_schedule_post(request):
         if not cp:
             return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
 
+        # Build config from body + defaults
+        config = _get_schedule(cp_id)
+        config["mode"] = mode
+        if "peak_watts" in body:
+            config["peak_watts"] = float(body["peak_watts"])
+        if "off_peak_watts" in body:
+            config["off_peak_watts"] = float(body["off_peak_watts"])
+        if "peak_start_hour" in body:
+            config["peak_start_hour"] = int(body["peak_start_hour"])
+        if "peak_end_hour" in body:
+            config["peak_end_hour"] = int(body["peak_end_hour"])
+        _schedule_configs[cp_id] = config
+        _schedule_state[cp_id] = {"mode": mode}  # backward compat
+
+        peak_w = config["peak_watts"]
+        off_w = config["off_peak_watts"]
+        start_h = config["peak_start_hour"]
+        end_h = config["peak_end_hour"]
+        start_s = start_h * 3600
+        end_s = end_h * 3600
+
         from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
         from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
 
         if mode == "stop":
             _LOGGER.info("STOP mode for %s — clearing profile + stopping any active charge", cp_id)
-            # Clear on-device schedule
             await cp.call(ClearChargingProfile(
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
-            # Stop any active transaction
             tx_id = _tx_ids.get(cp_id, 0)
             if tx_id:
                 try:
                     await cp.call(RemoteStopTransaction(transaction_id=tx_id))
-                    _LOGGER.info("Sent RemoteStopTransaction tx=%d for %s", tx_id, cp_id)
                 except Exception as e:
                     _LOGGER.warning("RemoteStopTransaction failed: %s", e)
-            # Set watt profile to 0 (prevent charging)
-            result = await cp.call(SetChargingProfile(
+            await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
@@ -669,12 +814,18 @@ async def handle_schedule_post(request):
                     ),
                 ),
             ))
-            _schedule_state[cp_id] = {"mode": "stop"}
             _record_event(cp_id, "schedule", "Mode: STOP — charging blocked")
 
         elif mode == "auto":
-            _LOGGER.info("AUTO mode for %s — 2-period schedule (4800W/1440W)", cp_id)
-            result = await cp.call(SetChargingProfile(
+            periods = [
+                ChargingSchedulePeriod(start_period=start_s, limit=peak_w),
+            ]
+            # Off-peak starts at end_hour
+            if end_s > start_s:
+                periods.append(ChargingSchedulePeriod(start_period=end_s, limit=off_w))
+            _LOGGER.info("AUTO mode for %s — peak %dW (%d:00-%d:00), off-peak %dW",
+                         cp_id, int(peak_w), start_h, end_h, int(off_w))
+            await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
@@ -682,24 +833,20 @@ async def handle_schedule_post(request):
                     charging_profile_kind=ChargingProfileKindType.relative,
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
-                            ChargingSchedulePeriod(start_period=57600, limit=1440.0),
-                        ],
+                        charging_schedule_period=periods,
                     ),
                 ),
             ))
-            _schedule_state[cp_id] = {"mode": "auto"}
-            _record_event(cp_id, "schedule", "Mode: AUTO (4800W 12am-4pm, 1440W 4pm-12am)")
+            _record_event(cp_id, "schedule",
+                          f"Mode: AUTO (peak {int(peak_w)}W {start_h}:00-{end_h}:00, off-peak {int(off_w)}W)")
 
         else:  # charge_now
-            _LOGGER.info("CHARGE NOW for %s — clearing profile + triggering start", cp_id)
+            _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)
             await cp.call(ClearChargingProfile(
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
-            # Set full-power profile as fallback
-            result = await cp.call(SetChargingProfile(
+            await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=0, stack_level=0,
@@ -708,27 +855,26 @@ async def handle_schedule_post(request):
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                            ChargingSchedulePeriod(start_period=0, limit=peak_w),
                         ],
                     ),
                 ),
             ))
-            # Try to initiate charging if connector 1 is ready
             conn1_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1", "")
             if conn1_status in ("Available", "Preparing"):
                 try:
-                    # Use the last-seen id_tag (or a default)
                     await cp.call(RemoteStartTransaction(
                         id_tag="0000003934", connector_id=1,
                     ))
-                    _LOGGER.info("Sent RemoteStartTransaction for %s", cp_id)
                 except Exception as e:
                     _LOGGER.warning("RemoteStartTransaction failed: %s", e)
-            _schedule_state[cp_id] = {"mode": "charge_now"}
             _record_event(cp_id, "schedule", "Mode: CHARGE NOW")
 
+        # Persist to DocumentDB
+        asyncio.create_task(_docdb_save_schedule(cp_id))
+
         await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode})
-        return web.json_response({"status": "ok", "mode": mode})
+        return web.json_response({"status": "ok", "mode": mode, "config": config})
 
     except Exception as e:
         _LOGGER.error("Schedule error: %s", e)
@@ -736,9 +882,16 @@ async def handle_schedule_post(request):
 
 
 async def handle_schedule_get(request):
-    """GET /schedule — Return schedule state and active CPs."""
+    """GET /schedule — Return schedule configs and active CPs."""
+    configs = {}
+    for cp_id in _active_cps:
+        configs[cp_id] = _get_schedule(cp_id)
+    for cp_id in _schedule_configs:
+        if cp_id not in configs:
+            configs[cp_id] = _schedule_configs[cp_id]
     return web.json_response({
-        "schedule_state": _schedule_state,
+        "schedule_state": _schedule_state,  # backward compat
+        "schedule_configs": configs,
         "active_cps": list(_active_cps.keys()),
     })
 
@@ -753,6 +906,13 @@ async def main():
     _LOGGER.info("Starting OCPP-MQTT Bridge...")
     _LOGGER.info("OCPP CSMS → %s:%d", OCPP_HOST, OCPP_PORT)
     _LOGGER.info("Web UI → http://0.0.0.0:%d/", UI_PORT)
+    if DOCDB_ENABLED:
+        _LOGGER.info("DocumentDB → %s (db=%s)", DOCDB_URL, DOCDB_DB)
+
+    # Initialize DocumentDB
+    if DOCDB_ENABLED:
+        await _docdb_ensure_db()
+        await _docdb_load_schedules()
 
     app = web.Application()
 

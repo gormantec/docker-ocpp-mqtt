@@ -38,7 +38,23 @@ Parameters:
   UI_PORT:
     Type: String
     Default: '9094'
+  DOCDB_URL:
+    Type: String
+    Default: http://docker-iot_docdb:5984
+    Description: CouchDB endpoint for schedule persistence
+  DOCDB_USER:
+    Type: String
+    Default: admin
+  DOCDB_PASSWORD:
+    Type: String
+    Default: '{{resolve:secretsmanager:gormantec.com/DOCDB_PASSWORD:SecretString}}'
+    NoEcho: true
 Resources:
+  DocDBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: DOCDB_PASSWORD
+      Description: DocumentDB master password (from SECRET_DOCDB_PASSWORD)
   OcppMqttLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -94,6 +110,15 @@ Resources:
             - Name: UI_PORT
               Value:
                 Ref: UI_PORT
+            - Name: DOCDB_URL
+              Value:
+                Ref: DOCDB_URL
+            - Name: DOCDB_USER
+              Value:
+                Ref: DOCDB_USER
+            - Name: DOCDB_PASSWORD
+              Value:
+                Ref: DOCDB_PASSWORD
       _restartPolicy: unless-stopped
   OcppMqttService:
     Type: AWS::ECS::Service

@@ -35,7 +35,10 @@ export default function App() {
       setLastRefresh(new Date());
       setError(null);
       if (schedRes.ok) {
-        try { setSchedule((await schedRes.json()).schedule_state || {}); } catch {}
+        try {
+          const schedJson = await schedRes.json();
+          setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {});
+        } catch {}
       }
     } catch (e) {
       setError(e.message === 'Failed to fetch' ? 'Connection lost — retrying…' : 'Server unavailable — retrying…');
@@ -66,10 +69,13 @@ export default function App() {
       });
       const result = await res.json();
       if (res.ok) {
-        setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'auto' ? 'AUTO (20A peak / 6A off-peak)' : mode === 'stop' ? 'STOP — all charging blocked' : 'CHARGE NOW — full power'}` });
+        setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'auto' ? 'AUTO (peak/off-peak schedule)' : mode === 'stop' ? 'STOP — all charging blocked' : 'CHARGE NOW — full power'}` });
         try {
           const schedRes = await fetch(`${BASE}schedule`);
-          if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
+          if (schedRes.ok) {
+            const schedJson = await schedRes.json();
+            setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {});
+          }
         } catch {}
       } else {
         setScheduleMsg({ type: 'error', text: result.error || 'Request failed' });
@@ -224,7 +230,7 @@ export default function App() {
               <div className="card-header">
                 <h3>⏱ Schedule Control</h3>
                 <span className="text-secondary" style={{fontSize: 12}}>
-                  STOP: block all | AUTO: 20A peak / 6A off-peak | CHARGE NOW: full power
+                  STOP: block all | AUTO: peak/off-peak schedule | CHARGE NOW: full power
                 </span>
               </div>
               <div className="card-body">
@@ -241,8 +247,13 @@ export default function App() {
                       </div>
                     )}
                     {connectedCps.map(cp => {
-                      const mode = schedule[cp.id]?.mode || 'charge_now';
+                      const schedCfg = schedule[cp.id] || {};
+                      const mode = schedCfg.mode || 'charge_now';
                       const conn1Status = (cp.physical_status || {})['1'] || 'unknown';
+                      const peakW = schedCfg.peak_watts || 4800;
+                      const offW = schedCfg.off_peak_watts || 1440;
+                      const peakStart = schedCfg.peak_start_hour ?? 0;
+                      const peakEnd = schedCfg.peak_end_hour ?? 16;
                       return (
                         <div key={cp.id} className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
                           <div className="info-item">
@@ -283,7 +294,7 @@ export default function App() {
                       );
                     })}
                     <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
-                      <strong>AUTO:</strong> Peak 12am-4pm (4800W/20A) | Off-peak 4pm-12am (1440W/6A) Sydney time
+                      <strong>AUTO:</strong> Peak {peakStart}:00–{peakEnd}:00 ({peakW}W) | Off-peak ({offW}W) Sydney time
                     </div>
                   </>
                 )}
