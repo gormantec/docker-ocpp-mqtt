@@ -22,6 +22,7 @@ export default function App() {
   const [schedule, setSchedule] = useState({});
   const [schedulePending, setSchedulePending] = useState(false);
   const [scheduleMsg, setScheduleMsg] = useState(null);
+  const [selectedCpId, setSelectedCpId] = useState(null);
 
   const fetchData = async () => {
     try {
@@ -54,9 +55,13 @@ export default function App() {
   }, []);
 
   const chargePoints = data?.charge_points || [];
-  const connectedCount = chargePoints.filter(cp => cp.connected).length;
-  const totalCount = chargePoints.length;
   const connectedCps = chargePoints.filter(cp => cp.connected);
+  const connectedCount = connectedCps.length;
+  const totalCount = chargePoints.length;
+
+  // Auto-select: first connected CP, else first in list, else null
+  const effectiveCpId = selectedCpId || (connectedCps[0]?.id) || (chargePoints[0]?.id) || null;
+  const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
   const setScheduleMode = async (cpId, mode) => {
     setSchedulePending(true);
@@ -138,9 +143,12 @@ export default function App() {
                 <div className="summary-value text-green">
                   {(() => {
                     const now = new Date();
-                    // Sydney is UTC+10 (AEST) — approximate for display
                     const sydHour = (now.getUTCHours() + 10) % 24;
-                    return sydHour < 16 ? `${16 - sydHour}h left` : `${40 - sydHour}h until`;
+                    const schedCfg = schedule[effectiveCpId] || {};
+                    const peakEnd = schedCfg.peak_end_hour ?? 16;
+                    if (sydHour < peakEnd) return `${peakEnd - sydHour}h peak left`;
+                    const peakStart = schedCfg.peak_start_hour ?? 0;
+                    return `${(24 - sydHour) + peakStart}h off-peak`;
                   })()}
                 </div>
                 <div className="summary-label">Peak Hours Today</div>
@@ -153,77 +161,97 @@ export default function App() {
               </div>
             </div>
 
-            {/* Charge Points Table */}
-            <div className="card">
-              <div className="card-header">
-                <h3>Charge Points</h3>
-                <span className="text-secondary" style={{fontSize: 12}}>
-                  {data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : ''}
-                </span>
+            {/* Charge Point Selector */}
+            {chargePoints.length > 0 && (
+              <div className="cp-selector" style={{
+                display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 16,
+                padding: '8px 0', borderBottom: '1px solid #3a4552'
+              }}>
+                {chargePoints.map(cp => (
+                  <button
+                    key={cp.id}
+                    className={`btn ${cp.id === effectiveCpId ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 13, padding: '6px 14px' }}
+                    onClick={() => setSelectedCpId(cp.id)}
+                  >
+                    <span className="status-dot" style={{
+                      backgroundColor: STATUS_COLORS[cp.status] || '#545B64',
+                      display: 'inline-block', width: 8, height: 8,
+                      borderRadius: '50%', marginRight: 6
+                    }} />
+                    {cp.id}
+                    {cp.connected ? '' : ' (offline)'}
+                  </button>
+                ))}
               </div>
-              <div className="card-body">
-                {chargePoints.length === 0 ? (
+            )}
+
+            {/* Selected Charge Point Detail */}
+            {selectedCp && (
+              <div className="card">
+                <div className="card-header">
+                  <h3>Charge Point: {selectedCp.id}</h3>
+                  <span style={{fontSize: 12}}>
+                    {selectedCp.connected ?
+                      <span className="badge badge-on">CONNECTED</span> :
+                      <span className="badge badge-off">OFFLINE</span>}
+                  </span>
+                </div>
+                <div className="card-body">
+                  <div className="info-grid">
+                    <div className="info-item">
+                      <span className="info-label">Connector 1 (Cable)</span>
+                      <span className="info-value">
+                        <span className="status-dot" style={{
+                          backgroundColor: STATUS_COLORS[(selectedCp.physical_status || {})['1']] || '#545B64',
+                          display: 'inline-block', width: 10, height: 10,
+                          borderRadius: '50%', marginRight: 6, verticalAlign: 'middle'
+                        }} />
+                        <strong>{(selectedCp.physical_status || {})['1'] || '—'}</strong>
+                      </span>
+                    </div>
+                    <div className="info-item">
+                      <span className="info-label">Connector 0 (Controller)</span>
+                      <span className="info-value" style={{color: '#95a5a6'}}>
+                        {(selectedCp.connectors || {})['0'] || '—'}
+                      </span>
+                    </div>
+                    <div className="info-item">
+                      <span className="info-label">Best Status</span>
+                      <span className="info-value">
+                        <span className="status-dot" style={{
+                          backgroundColor: STATUS_COLORS[selectedCp.status] || '#545B64',
+                          display: 'inline-block', width: 10, height: 10,
+                          borderRadius: '50%', marginRight: 6, verticalAlign: 'middle'
+                        }} />
+                        {selectedCp.status || 'unknown'}
+                      </span>
+                    </div>
+                    <div className="info-item">
+                      <span className="info-label">Last Event</span>
+                      <span className="info-value date-cell">
+                        {selectedCp.last_event ? new Date(selectedCp.last_event).toLocaleTimeString() : '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {chargePoints.length === 0 && (
+              <div className="card">
+                <div className="card-header"><h3>Charge Points</h3></div>
+                <div className="card-body">
                   <div className="empty-state">
                     <p>No charge points connected yet.</p>
                     <p className="hint">
-                      Configure your EV charger to connect to this bridge at:<br/>
-                      <code>ws://{'{host}'}:9000/{'{charge_point_id}'}</code>
+                      Configure your EV charger to connect at:<br/>
+                      <code>ws://{'host'}:9000/{'{charge_point_id}'}</code>
                     </p>
                   </div>
-                ) : (
-                  <div className="table-wrap">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Charge Point ID</th>
-                          <th>Connector 1</th>
-                          <th>Connector 0</th>
-                          <th>Best Status</th>
-                          <th>Connected</th>
-                          <th>Last Event</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {chargePoints.map((cp) => {
-                          const physStatus = cp.physical_status || {};
-                          const conn1 = physStatus['1'] || '—';
-                          const conn0 = (cp.connectors || {})['0'] || '—';
-                          return (
-                          <tr key={cp.id}>
-                            <td className="mono-cell">{cp.id}</td>
-                            <td>
-                              <span className="status-dot" style={{
-                                backgroundColor: STATUS_COLORS[conn1] || '#545B64',
-                                display: 'inline-block', width: 10, height: 10,
-                                borderRadius: '50%', marginRight: 6
-                              }} />
-                              <strong>{conn1}</strong>
-                            </td>
-                            <td style={{color: '#95a5a6'}}>{conn0}</td>
-                            <td>
-                              <span className="status-dot" style={{
-                                backgroundColor: STATUS_COLORS[cp.status] || '#545B64',
-                                display: 'inline-block', width: 10, height: 10,
-                                borderRadius: '50%', marginRight: 6
-                              }} />
-                              {cp.status || 'unknown'}
-                            </td>
-                            <td>
-                              <span className={`badge ${cp.connected ? 'badge-on' : 'badge-off'}`}>
-                                {cp.connected ? 'YES' : 'NO'}
-                              </span>
-                            </td>
-                            <td className="date-cell">
-                              {cp.last_event ? new Date(cp.last_event).toLocaleTimeString() : '—'}
-                            </td>
-                          </tr>
-                        )})}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Schedule Control */}
             <div className="card">
@@ -234,10 +262,10 @@ export default function App() {
                 </span>
               </div>
               <div className="card-body">
-                {connectedCps.length === 0 ? (
-                  <div className="empty-state">
-                    <p>No charge points connected.</p>
-                  </div>
+                {!effectiveCpId ? (
+                  <div className="empty-state"><p>No charge point selected.</p></div>
+                ) : !selectedCp?.connected ? (
+                  <div className="empty-state"><p>{effectiveCpId} is offline — cannot control schedule.</p></div>
                 ) : (
                   <>
                     {scheduleMsg && (
@@ -246,56 +274,42 @@ export default function App() {
                         {scheduleMsg.text}
                       </div>
                     )}
-                    {connectedCps.map(cp => {
-                      const schedCfg = schedule[cp.id] || {};
+                    {(() => {
+                      const schedCfg = schedule[effectiveCpId] || {};
                       const mode = schedCfg.mode || 'charge_now';
-                      const conn1Status = (cp.physical_status || {})['1'] || 'unknown';
                       const peakW = schedCfg.peak_watts || 4800;
                       const offW = schedCfg.off_peak_watts || 1440;
                       const peakStart = schedCfg.peak_start_hour ?? 0;
                       const peakEnd = schedCfg.peak_end_hour ?? 16;
                       return (
-                        <div key={cp.id} className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
-                          <div className="info-item">
-                            <span className="info-label">Charge Point</span>
-                            <span className="info-value mono-cell">{cp.id}</span>
-                          </div>
-                          <div className="info-item">
-                            <span className="info-label">Connector 1</span>
-                            <span className="info-value">
-                              <span className="status-dot" style={{
-                                backgroundColor: STATUS_COLORS[conn1Status] || '#545B64',
-                                display: 'inline-block', width: 10, height: 10,
-                                borderRadius: '50%', marginRight: 6, verticalAlign: 'middle'
-                              }} />
-                              {conn1Status}
-                            </span>
-                          </div>
-                          <div className="info-item">
-                            <span className="info-label">Mode</span>
-                            <span className="info-value">
-                              <span className={`badge ${mode === 'stop' ? 'badge-off' : mode === 'auto' ? 'badge-warn' : 'badge-on'}`}>
-                                {mode === 'stop' ? '🛑 STOP' : mode === 'auto' ? '⏱ AUTO' : '⚡ CHARGE NOW'}
+                        <>
+                          <div className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
+                            <div className="info-item">
+                              <span className="info-label">Mode</span>
+                              <span className="info-value">
+                                <span className={`badge ${mode === 'stop' ? 'badge-off' : mode === 'auto' ? 'badge-warn' : 'badge-on'}`}>
+                                  {mode === 'stop' ? '🛑 STOP' : mode === 'auto' ? '⏱ AUTO' : '⚡ CHARGE NOW'}
+                                </span>
                               </span>
-                            </span>
+                            </div>
+                            <div className="info-item" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                              <button className={`btn ${mode === 'stop' ? 'btn-danger' : 'btn-secondary'}`}
+                                disabled={schedulePending || mode === 'stop'}
+                                onClick={() => setScheduleMode(effectiveCpId, 'stop')}>🛑 STOP</button>
+                              <button className={`btn ${mode === 'auto' ? 'btn-primary' : 'btn-secondary'}`}
+                                disabled={schedulePending || mode === 'auto'}
+                                onClick={() => setScheduleMode(effectiveCpId, 'auto')}>⏱ AUTO</button>
+                              <button className={`btn ${mode === 'charge_now' ? 'btn-charge' : 'btn-secondary'}`}
+                                disabled={schedulePending || mode === 'charge_now'}
+                                onClick={() => setScheduleMode(effectiveCpId, 'charge_now')}>⚡ CHARGE NOW</button>
+                            </div>
                           </div>
-                          <div className="info-item" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                            <button className={`btn ${mode === 'stop' ? 'btn-danger' : 'btn-secondary'}`}
-                              disabled={schedulePending || mode === 'stop'}
-                              onClick={() => setScheduleMode(cp.id, 'stop')}>🛑 STOP</button>
-                            <button className={`btn ${mode === 'auto' ? 'btn-primary' : 'btn-secondary'}`}
-                              disabled={schedulePending || mode === 'auto'}
-                              onClick={() => setScheduleMode(cp.id, 'auto')}>⏱ AUTO</button>
-                            <button className={`btn ${mode === 'charge_now' ? 'btn-charge' : 'btn-secondary'}`}
-                              disabled={schedulePending || mode === 'charge_now'}
-                              onClick={() => setScheduleMode(cp.id, 'charge_now')}>⚡ CHARGE NOW</button>
+                          <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
+                            <strong>AUTO:</strong> Peak {peakStart}:00–{peakEnd}:00 ({peakW}W) | Off-peak ({offW}W) Sydney time
                           </div>
-                        </div>
+                        </>
                       );
-                    })}
-                    <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
-                      <strong>AUTO:</strong> Peak {peakStart}:00–{peakEnd}:00 ({peakW}W) | Off-peak ({offW}W) Sydney time
-                    </div>
+                    })()}
                   </>
                 )}
               </div>
@@ -306,7 +320,7 @@ export default function App() {
               <div className="card-header">
                 <h3>Recent Events</h3>
                 <span className="text-secondary" style={{fontSize: 12}}>
-                  Last {data.recent_events?.length || 0} events
+                  {effectiveCpId ? `Filtered: ${effectiveCpId}` : 'All charge points'}
                 </span>
               </div>
               <div className="card-body" style={{ maxHeight: 280, overflowY: 'auto' }}>
@@ -326,7 +340,9 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {data.recent_events.map((ev, i) => (
+                        {data.recent_events
+                          .filter(ev => !effectiveCpId || ev.charge_point_id === effectiveCpId)
+                          .map((ev, i) => (
                           <tr key={i}>
                             <td className="date-cell">{new Date(ev.time).toLocaleTimeString()}</td>
                             <td className="mono-cell">{ev.charge_point_id}</td>
