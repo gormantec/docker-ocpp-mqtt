@@ -387,6 +387,15 @@ async def ocpp_ws_handler(request: web.Request):
     """Handle an OCPP WebSocket connection from a charge point."""
     cp_id = request.match_info.get("cp_id", "unknown")
 
+    # ── Debug logging: reverse-engineer charger auth fields ──
+    _LOGGER.info("WS connect attempt — cp_id=%s | path=%s | query=%s",
+                 cp_id, request.path, request.query_string)
+    _LOGGER.info("WS headers for %s:", cp_id)
+    for name, value in request.headers.items():
+        _LOGGER.info("  %s: %s", name, value)
+    _LOGGER.info("WS subprotocols requested: %s",
+                 request.headers.get("Sec-WebSocket-Protocol", "(none)"))
+
     ws = web.WebSocketResponse(protocols=["ocpp1.6"])
     await ws.prepare(request)
 
