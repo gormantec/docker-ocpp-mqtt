@@ -29,14 +29,21 @@ export default function App() {
         fetch(`${BASE}debug`),
         fetch(`${BASE}schedule`),
       ]);
-      if (!debugRes.ok) throw new Error(`HTTP ${debugRes.status}`);
+      if (!debugRes.ok) throw new Error('Server unavailable');
+      const ct = debugRes.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) throw new Error('Server unavailable');
       const json = await debugRes.json();
       setData(json);
       setLastRefresh(new Date());
       setError(null);
-      if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
+      if (schedRes.ok) {
+        const sct = schedRes.headers.get('content-type') || '';
+        if (sct.includes('application/json')) {
+          setSchedule((await schedRes.json()).schedule_state || {});
+        }
+      }
     } catch (e) {
-      setError(e.message);
+      setError(e.message === 'Failed to fetch' ? 'Connection lost — retrying…' : e.message);
     } finally {
       setLoading(false);
     }
@@ -62,16 +69,26 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cp_id: cpId, mode }),
       });
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) throw new Error('Server unavailable — try again shortly');
       const result = await res.json();
       if (res.ok) {
         setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'auto' ? 'AUTO (20A peak / 6A off-peak)' : mode === 'stop' ? 'STOP — all charging blocked' : 'CHARGE NOW — full power'}` });
         const schedRes = await fetch(`${BASE}schedule`);
-        if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
+        if (schedRes.ok) {
+          const sct = schedRes.headers.get('content-type') || '';
+          if (sct.includes('application/json')) {
+            setSchedule((await schedRes.json()).schedule_state || {});
+          }
+        }
       } else {
-        setScheduleMsg({ type: 'error', text: result.error || 'Failed' });
+        setScheduleMsg({ type: 'error', text: result.error || 'Request failed' });
       }
     } catch (e) {
-      setScheduleMsg({ type: 'error', text: e.message });
+      const msg = e.message === 'Failed to fetch'
+        ? 'Connection lost — is the bridge running?'
+        : e.message;
+      setScheduleMsg({ type: 'error', text: msg });
     } finally {
       setSchedulePending(false);
     }
@@ -96,9 +113,9 @@ export default function App() {
 
         {error && (
           <div className="error-card">
-            <h3>Connection Error</h3>
+            <h3>Connection Issue</h3>
             <p>{error}</p>
-            <p className="hint">Make sure the OCPP bridge is running.</p>
+            <p className="hint">The bridge may be restarting — data will refresh automatically.</p>
           </div>
         )}
 
