@@ -64,7 +64,7 @@ export default function App() {
       });
       const result = await res.json();
       if (res.ok) {
-        setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'scheduled' ? 'Scheduled (20A day / 6A night)' : 'Always On'}` });
+        setScheduleMsg({ type: 'success', text: `${cpId}: ${mode === 'auto' ? 'AUTO (20A peak / 6A off-peak)' : mode === 'stop' ? 'STOP — all charging blocked' : 'CHARGE NOW — full power'}` });
         const schedRes = await fetch(`${BASE}schedule`);
         if (schedRes.ok) setSchedule((await schedRes.json()).schedule_state || {});
       } else {
@@ -123,6 +123,17 @@ export default function App() {
                   {chargePoints.filter(cp => cp.status === 'Charging').length}
                 </div>
                 <div className="summary-label">Charging</div>
+              </div>
+              <div className="summary-card">
+                <div className="summary-value text-green">
+                  {(() => {
+                    const now = new Date();
+                    // Sydney is UTC+10 (AEST) — approximate for display
+                    const sydHour = (now.getUTCHours() + 10) % 24;
+                    return sydHour < 16 ? `${16 - sydHour}h left` : `${40 - sydHour}h until`;
+                  })()}
+                </div>
+                <div className="summary-label">Peak Hours Today</div>
               </div>
               <div className="summary-card">
                 <div className={`summary-value ${data.uptime_seconds > 60 ? 'text-green' : 'text-warn'}`}>
@@ -191,6 +202,65 @@ export default function App() {
               </div>
             </div>
 
+            {/* Schedule Control */}
+            <div className="card">
+              <div className="card-header">
+                <h3>⏱ Schedule Control</h3>
+                <span className="text-secondary" style={{fontSize: 12}}>
+                  STOP: block all | AUTO: 20A peak / 6A off-peak | CHARGE NOW: full power
+                </span>
+              </div>
+              <div className="card-body">
+                {connectedCps.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No charge points connected.</p>
+                  </div>
+                ) : (
+                  <>
+                    {scheduleMsg && (
+                      <div className={`alert ${scheduleMsg.type === 'success' ? 'alert-success' : 'alert-error'}`}
+                           style={{ marginBottom: 16 }}>
+                        {scheduleMsg.text}
+                      </div>
+                    )}
+                    {connectedCps.map(cp => {
+                      const mode = schedule[cp.id]?.mode || 'charge_now';
+                      return (
+                        <div key={cp.id} className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
+                          <div className="info-item">
+                            <span className="info-label">Charge Point</span>
+                            <span className="info-value mono-cell">{cp.id}</span>
+                          </div>
+                          <div className="info-item">
+                            <span className="info-label">Mode</span>
+                            <span className="info-value">
+                              <span className={`badge ${mode === 'stop' ? 'badge-off' : mode === 'auto' ? 'badge-warn' : 'badge-on'}`}>
+                                {mode === 'stop' ? '🛑 STOP' : mode === 'auto' ? '⏱ AUTO' : '⚡ CHARGE NOW'}
+                              </span>
+                            </span>
+                          </div>
+                          <div className="info-item" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <button className={`btn ${mode === 'stop' ? 'btn-danger' : 'btn-secondary'}`}
+                              disabled={schedulePending || mode === 'stop'}
+                              onClick={() => setScheduleMode(cp.id, 'stop')}>🛑 STOP</button>
+                            <button className={`btn ${mode === 'auto' ? 'btn-primary' : 'btn-secondary'}`}
+                              disabled={schedulePending || mode === 'auto'}
+                              onClick={() => setScheduleMode(cp.id, 'auto')}>⏱ AUTO</button>
+                            <button className={`btn ${mode === 'charge_now' ? 'btn-charge' : 'btn-secondary'}`}
+                              disabled={schedulePending || mode === 'charge_now'}
+                              onClick={() => setScheduleMode(cp.id, 'charge_now')}>⚡ CHARGE NOW</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
+                      <strong>AUTO:</strong> Peak 12am-4pm (4800W/20A) | Off-peak 4pm-12am (1440W/6A) Sydney time
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
             {/* Recent Events */}
             <div className="card">
               <div className="card-header">
@@ -199,7 +269,7 @@ export default function App() {
                   Last {data.recent_events?.length || 0} events
                 </span>
               </div>
-              <div className="card-body">
+              <div className="card-body" style={{ maxHeight: 280, overflowY: 'auto' }}>
                 {(!data.recent_events || data.recent_events.length === 0) ? (
                   <div className="empty-state">
                     <p>No events yet. Waiting for charge point activity…</p>
@@ -266,69 +336,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Schedule Control */}
-            <div className="card">
-              <div className="card-header">
-                <h3>⏱ Schedule Control</h3>
-                <span className="text-secondary" style={{fontSize: 12}}>
-                  Set charging schedule per charge point
-                </span>
-              </div>
-              <div className="card-body">
-                {connectedCps.length === 0 ? (
-                  <div className="empty-state">
-                    <p>No charge points connected. Connect a charger to control its schedule.</p>
-                  </div>
-                ) : (
-                  <>
-                    {scheduleMsg && (
-                      <div className={`alert ${scheduleMsg.type === 'success' ? 'alert-success' : 'alert-error'}`}
-                           style={{ marginBottom: 16, padding: '8px 12px', borderRadius: 4 }}>
-                        {scheduleMsg.text}
-                      </div>
-                    )}
-                    {connectedCps.map(cp => {
-                      const mode = schedule[cp.id]?.mode || 'always_on';
-                      return (
-                        <div key={cp.id} className="info-grid" style={{ marginBottom: 16, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
-                          <div className="info-item">
-                            <span className="info-label">Charge Point</span>
-                            <span className="info-value mono-cell">{cp.id}</span>
-                          </div>
-                          <div className="info-item">
-                            <span className="info-label">Current Mode</span>
-                            <span className="info-value">
-                              <span className={`badge ${mode === 'scheduled' ? 'badge-warn' : 'badge-on'}`}>
-                                {mode === 'scheduled' ? '⏱ Scheduled' : '🔌 Always On'}
-                              </span>
-                            </span>
-                          </div>
-                          <div className="info-item" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                            <button
-                              className="btn btn-primary"
-                              disabled={schedulePending || mode === 'scheduled'}
-                              onClick={() => setScheduleMode(cp.id, 'scheduled')}
-                              style={{ padding: '6px 14px' }}>
-                              Enable Schedule
-                            </button>
-                            <button
-                              className="btn btn-secondary"
-                              disabled={schedulePending || mode === 'always_on'}
-                              onClick={() => setScheduleMode(cp.id, 'always_on')}
-                              style={{ padding: '6px 14px' }}>
-                              Always On
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
-                      <strong>Scheduled:</strong> 20A (full speed) from 12:00 AM – 4:00 PM | 6A (minimum) from 4:00 PM – 12:00 AM
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
           </>
         )}
       </main>

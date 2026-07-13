@@ -222,6 +222,18 @@ body {
   border-color: var(--aws-blue);
 }
 .btn-primary:hover:not(:disabled) { background: #005d96; }
+.btn-danger {
+  background: var(--aws-red);
+  color: #fff;
+  border-color: var(--aws-red);
+}
+.btn-danger:hover:not(:disabled) { background: #a80f00; }
+.btn-charge {
+  background: var(--aws-green);
+  color: #fff;
+  border-color: var(--aws-green);
+}
+.btn-charge:hover:not(:disabled) { background: #06683a; }
 .btn-secondary {
   background: #fff;
   color: var(--aws-text);

@@ -61,18 +61,20 @@ SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 # ---------------------------------------------------------------------------
 
 def _is_charging_allowed(cp_id: str) -> bool:
-    """Check if charging is currently allowed for this charge point.
+    """Check if charging is currently allowed.
     
-    always_on mode → always True.
-    scheduled mode → True only during 12am-4pm Sydney time (peak).
+    stop   → always False (terminate + deny all).
+    auto   → True 12am-4pm Sydney, False 4pm-12am.
+    charge_now → always True.
     """
-    state = _schedule_state.get(cp_id, {}).get("mode", "always_on")
-    if state != "scheduled":
+    state = _schedule_state.get(cp_id, {}).get("mode", "charge_now")
+    if state == "stop":
+        return False
+    if state == "charge_now":
         return True
+    # auto (scheduled)
     now_syd = datetime.now(SYDNEY_TZ)
-    hour = now_syd.hour
-    # 12am (0) to 4pm (15:59) = allowed, 4pm (16) to 12am (23:59) = blocked
-    return hour < 16
+    return now_syd.hour < 16
 
 # ---------------------------------------------------------------------------
 # Safe env helpers
@@ -561,60 +563,44 @@ async def handle_index(request):
 # ---------------------------------------------------------------------------
 
 _schedule_state: dict[str, dict] = {}
+# Track active transaction IDs per CP for RemoteStopTransaction
+_tx_ids: dict[str, int] = {}
 
 async def handle_schedule_post(request):
-    """POST /schedule — Set or clear charging schedule.
-    Body: {"cp_id": "4b8609", "mode": "scheduled"|"always_on"}
+    """POST /schedule — Set charging mode.
+    Body: {"cp_id": "4b8609", "mode": "stop"|"auto"|"charge_now"}
     """
     try:
         body = await request.json()
         cp_id = body.get("cp_id")
         mode = body.get("mode")
 
-        if not cp_id or mode not in ("scheduled", "always_on"):
-            return web.json_response({"error": "Missing cp_id or invalid mode (use scheduled|always_on)"}, status=400)
+        if not cp_id or mode not in ("stop", "auto", "charge_now"):
+            return web.json_response({"error": "Missing cp_id or invalid mode (use stop|auto|charge_now)"}, status=400)
 
         cp = _active_cps.get(cp_id)
         if not cp:
             return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
 
-        if mode == "always_on":
-            _LOGGER.info("Clearing charging profile for %s", cp_id)
-            try:
-                result = await cp.call(ClearChargingProfile(
-                    id=1, connector_id=0,
-                    charging_profile_purpose="TxDefaultProfile",
-                    stack_level=0,
-                ))
-            except Exception as e:
-                _LOGGER.warning("ClearChargingProfile failed, falling back to 20A flat: %s", e)
-                from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
-                from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
-                result = await cp.call(SetChargingProfile(
-                    connector_id=0,
-                    cs_charging_profiles=ChargingProfile(
-                        charging_profile_id=0, stack_level=0,
-                        charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                        charging_profile_kind=ChargingProfileKindType.relative,
-                        charging_schedule=ChargingSchedule(
-                            charging_rate_unit=ChargingRateUnitType.watts,
-                            charging_schedule_period=[
-                                ChargingSchedulePeriod(start_period=0, limit=4800.0),
-                            ],
-                        ),
-                    ),
-                ))
+        from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+        from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
 
-            _schedule_state[cp_id] = {"mode": "always_on"}
-            _record_event(cp_id, "schedule", "Mode: always_on")
-
-        else:
-            _LOGGER.info("Setting scheduled profile for %s", cp_id)
-            from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
-            from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
-
-            # Charger only accepts W (watts), not A (amps). 240V system:
-            # 20A × 240V = 4800W, 6A × 240V = 1440W
+        if mode == "stop":
+            _LOGGER.info("STOP mode for %s — clearing profile + stopping any active charge", cp_id)
+            # Clear on-device schedule
+            await cp.call(ClearChargingProfile(
+                id=1, connector_id=0,
+                charging_profile_purpose="TxDefaultProfile", stack_level=0,
+            ))
+            # Stop any active transaction
+            tx_id = _tx_ids.get(cp_id, 0)
+            if tx_id:
+                try:
+                    await cp.call(RemoteStopTransaction(transaction_id=tx_id))
+                    _LOGGER.info("Sent RemoteStopTransaction tx=%d for %s", tx_id, cp_id)
+                except Exception as e:
+                    _LOGGER.warning("RemoteStopTransaction failed: %s", e)
+            # Set watt profile to 0 (prevent charging)
             result = await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
@@ -624,17 +610,70 @@ async def handle_schedule_post(request):
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),     # 12am-4pm: 20A
-                            ChargingSchedulePeriod(start_period=57600, limit=1440.0), # 4pm-12am: 6A
+                            ChargingSchedulePeriod(start_period=0, limit=0.0),
                         ],
                     ),
                 ),
             ))
+            _schedule_state[cp_id] = {"mode": "stop"}
+            _record_event(cp_id, "schedule", "Mode: STOP — charging blocked")
 
-            _schedule_state[cp_id] = {"mode": "scheduled"}
-            _record_event(cp_id, "schedule", "Mode: scheduled (4800W 12am-4pm, 1440W 4pm-12am)")
+        elif mode == "auto":
+            _LOGGER.info("AUTO mode for %s — 2-period schedule (4800W/1440W)", cp_id)
+            result = await cp.call(SetChargingProfile(
+                connector_id=0,
+                cs_charging_profiles=ChargingProfile(
+                    charging_profile_id=1, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.watts,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                            ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                        ],
+                    ),
+                ),
+            ))
+            _schedule_state[cp_id] = {"mode": "auto"}
+            _record_event(cp_id, "schedule", "Mode: AUTO (4800W 12am-4pm, 1440W 4pm-12am)")
 
-        await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode, "result": str(result)})
+        else:  # charge_now
+            _LOGGER.info("CHARGE NOW for %s — clearing profile + triggering start", cp_id)
+            await cp.call(ClearChargingProfile(
+                id=1, connector_id=0,
+                charging_profile_purpose="TxDefaultProfile", stack_level=0,
+            ))
+            # Set full-power profile as fallback
+            result = await cp.call(SetChargingProfile(
+                connector_id=0,
+                cs_charging_profiles=ChargingProfile(
+                    charging_profile_id=0, stack_level=0,
+                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_schedule=ChargingSchedule(
+                        charging_rate_unit=ChargingRateUnitType.watts,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                        ],
+                    ),
+                ),
+            ))
+            # Try to initiate charging if a car is connected (connector 1)
+            cp_status = _cp_state.get(cp_id, {}).get("status", "")
+            if cp_status in ("Available", "Preparing"):
+                try:
+                    # Use the last-seen id_tag (or a default)
+                    await cp.call(RemoteStartTransaction(
+                        id_tag="0000003934", connector_id=1,
+                    ))
+                    _LOGGER.info("Sent RemoteStartTransaction for %s", cp_id)
+                except Exception as e:
+                    _LOGGER.warning("RemoteStartTransaction failed: %s", e)
+            _schedule_state[cp_id] = {"mode": "charge_now"}
+            _record_event(cp_id, "schedule", "Mode: CHARGE NOW")
+
+        await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode})
         return web.json_response({"status": "ok", "mode": mode})
 
     except Exception as e:
