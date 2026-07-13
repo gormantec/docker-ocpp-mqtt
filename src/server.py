@@ -725,9 +725,8 @@ async def main():
     app.router.add_get("/schedule", handle_schedule_get)
     app.router.add_post("/schedule", handle_schedule_post)
 
-    # OCPP WebSocket endpoints
-    app.router.add_get("/{cp_id}", ocpp_ws_handler)
-    app.router.add_get("/{prefix}/{cp_id}", ocpp_ws_handler)
+    # OCPP WebSocket endpoint — chargers connect via wss://ocpp.gormantec.com/ocpp16/{cp_id}
+    app.router.add_get("/ocpp16/{cp_id}", ocpp_ws_handler)
 
     # Static UI
     ui_dist = os.path.join(os.path.dirname(__file__), "ui", "dist")
