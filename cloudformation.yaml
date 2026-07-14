@@ -49,6 +49,10 @@ Parameters:
     Type: String
     Default: '{{resolve:secretsmanager:gormantec.com/DOCDB_PASSWORD:SecretString}}'
     NoEcho: true
+  ESY_THING_NAME:
+    Type: String
+    Default: gormantec-battery1
+    Description: MQTT thing name for esy-sunhomes telemetry
 Resources:
   DocDBPasswordSecret:
     Type: AWS::SecretsManager::Secret
@@ -119,6 +123,9 @@ Resources:
             - Name: DOCDB_PASSWORD
               Value:
                 Ref: DOCDB_PASSWORD
+            - Name: ESY_THING_NAME
+              Value:
+                Ref: ESY_THING_NAME
       _restartPolicy: unless-stopped
   OcppMqttService:
     Type: AWS::ECS::Service

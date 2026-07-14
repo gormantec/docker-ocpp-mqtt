@@ -568,7 +568,8 @@ async def mqtt_listener():
     async with mqtt_ctx as client:
         _mqtt_client = client
         await client.subscribe("ocpp/+/cmd")
-        _LOGGER.info("Subscribed to MQTT topic: ocpp/+/cmd")
+        await client.subscribe(ESY_TELEMETRY_TOPIC)
+        _LOGGER.info("Subscribed to MQTT topics: ocpp/+/cmd, %s", ESY_TELEMETRY_TOPIC)
 
         async for message in client.messages:
             topic = str(message.topic)
@@ -576,6 +577,21 @@ async def mqtt_listener():
             if len(parts) >= 3 and parts[2] == "cmd":
                 cp_id = parts[1]
                 await _handle_mqtt_command(cp_id, message.payload)
+            elif topic == ESY_TELEMETRY_TOPIC:
+                try:
+                    payload_str = message.payload.decode() if isinstance(message.payload, bytes) else str(message.payload)
+                    data = json.loads(payload_str)
+                    if "gridImport" in data:
+                        _solar_metrics["grid_import"] = int(float(data["gridImport"]))
+                    if "gridExport" in data:
+                        _solar_metrics["grid_export"] = int(float(data["gridExport"]))
+                    if "batterySoc" in data:
+                        _solar_metrics["battery_soc"] = int(float(data["batterySoc"]))
+                    if "pvPower" in data:
+                        _solar_metrics["pv_power"] = int(float(data["pvPower"]))
+                    _solar_metrics["last_update"] = datetime.now(timezone.utc)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +633,14 @@ async def handle_debug(request):
         "ui_port": UI_PORT,
         "charge_points": charge_points,
         "recent_events": recent_events[:50],
+        "solar_metrics": {
+            "grid_import": _solar_metrics["grid_import"],
+            "grid_export": _solar_metrics["grid_export"],
+            "battery_soc": _solar_metrics["battery_soc"],
+            "pv_power": _solar_metrics["pv_power"],
+            "last_update": _solar_metrics["last_update"].isoformat() if _solar_metrics["last_update"] else None,
+        },
+        "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
     })
 
 
@@ -640,6 +664,33 @@ _schedule_state: dict[str, dict] = {}
 # Track active transaction IDs per CP for RemoteStopTransaction
 _tx_ids: dict[str, int] = {}
 
+# Solar Smart state — populated from ESY sunhomes MQTT telemetry
+_solar_metrics = {
+    "grid_import": 0,     # Watts importing from grid
+    "grid_export": 0,     # Watts exporting to grid
+    "battery_soc": None,  # Battery % (None = unknown)
+    "pv_power": 0,        # Solar generation Watts
+    "last_update": None,  # datetime of last ESY telemetry
+}
+
+# Solar Smart per-CP throttle state
+# {cp_id: {"throttled_watts": float, "direction": "down"|"up"|None, "consecutive": int}}
+_solar_throttle: dict[str, dict] = {}
+
+# ESY sunhomes MQTT thing name (must match cloudformation)
+ESY_THING_NAME = _env_str("ESY_THING_NAME", "gormantec-battery1")
+ESY_TELEMETRY_TOPIC = f"$iothub/twin/PATCH/properties/reported/{ESY_THING_NAME}"
+
+# Solar Smart constants
+SOLAR_GRID_IMPORT_THRESHOLD = 500     # Watts — above this, throttle down
+SOLAR_RAMP_STEP = 480                 # Watts per step
+SOLAR_MIN_WATTS = 1440                # Floor — never go below this
+SOLAR_DOWN_CHECKS = 4                 # 2min @ 30s intervals → ramp down
+SOLAR_UP_CHECKS = 20                  # 10min @ 30s intervals → ramp up
+SOLAR_UP_BATTERY_SOC_MIN = 30        # Battery SOC must be > this to ramp up
+SOLAR_UP_PV_MIN = 500                # PV must be > this to ramp up
+SOLAR_CHECK_INTERVAL = 30            # Seconds between throttle checks
+
 # Per-CP schedule config (persisted to DocumentDB)
 # {cp_id: {mode, peak_start_hour, peak_end_hour, peak_watts, off_peak_watts}}
 _schedule_configs: dict[str, dict] = {}
@@ -655,6 +706,10 @@ DEFAULT_SCHEDULE = {
         {"start_hour": 0, "limit_watts": 4800.0},
         {"start_hour": 16, "limit_watts": 1440.0},
     ],
+    # Solar Smart: dynamically throttle charging based on grid import/export
+    "solar_smart": False,
+    "off_peak_start_hour": 0,   # off-peak grid window (cheap power, allow grid import)
+    "off_peak_end_hour": 6,
 }
 
 # Common timezones for UI dropdown
@@ -796,6 +851,148 @@ def _get_schedule(cp_id: str) -> dict:
     """Get schedule config for a charge point (defaults if unknown)."""
     return _schedule_configs.get(cp_id, dict(DEFAULT_SCHEDULE))
 
+
+# ---------------------------------------------------------------------------
+# Solar Smart throttling
+# ---------------------------------------------------------------------------
+
+def _get_period_limit_for_hour(cp_id: str, hour: int) -> float:
+    """Get the configured watt limit for a given hour from the CP's periods."""
+    config = _get_schedule(cp_id)
+    periods = sorted(config.get("periods", DEFAULT_SCHEDULE["periods"]),
+                     key=lambda p: p["start_hour"])
+    active = periods[0]
+    for p in periods:
+        if p["start_hour"] <= hour:
+            active = p
+    return active.get("limit_watts", 4800.0)
+
+
+def _is_off_peak(cp_id: str) -> bool:
+    """Check if we're in the off-peak grid window for this CP."""
+    config = _get_schedule(cp_id)
+    tz = _get_tz(cp_id)
+    hour = datetime.now(tz).hour
+    start = config.get("off_peak_start_hour", 0)
+    end = config.get("off_peak_end_hour", 6)
+    if start <= end:
+        return start <= hour < end
+    else:
+        return hour >= start or hour < end
+
+
+async def _apply_throttled_watts(cp_id: str, watts: float):
+    """Send SetChargingProfile with a throttled watt limit."""
+    cp = _active_cps.get(cp_id)
+    if not cp:
+        return
+    from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+    from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
+    try:
+        await cp.call(SetChargingProfile(
+            connector_id=0,
+            cs_charging_profiles=ChargingProfile(
+                charging_profile_id=1, stack_level=0,
+                charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                charging_profile_kind=ChargingProfileKindType.relative,
+                charging_schedule=ChargingSchedule(
+                    charging_rate_unit=ChargingRateUnitType.watts,
+                    charging_schedule_period=[
+                        ChargingSchedulePeriod(start_period=0, limit=watts),
+                    ],
+                ),
+            ),
+        ))
+        _LOGGER.info("Solar Smart: %s throttled to %.0fW", cp_id, watts)
+        _record_event(cp_id, "solar_throttle", f"throttled to {watts:.0f}W")
+    except Exception as e:
+        _LOGGER.warning("Solar Smart: SetChargingProfile failed for %s: %s", cp_id, e)
+
+
+async def _solar_smart_tick():
+    """Periodic check: adjust charge rates based on grid import/export."""
+    for cp_id, config in list(_schedule_configs.items()):
+        mode = config.get("mode", "charge_now")
+        solar_smart = config.get("solar_smart", False)
+        if mode != "auto" or not solar_smart:
+            continue
+        cp = _active_cps.get(cp_id)
+        if not cp:
+            continue
+
+        # Off-peak window: reset to configured period rate, no throttling
+        if _is_off_peak(cp_id):
+            tz = _get_tz(cp_id)
+            hour = datetime.now(tz).hour
+            configured_watts = _get_period_limit_for_hour(cp_id, hour)
+            if cp_id in _solar_throttle:
+                del _solar_throttle[cp_id]
+                await _apply_throttled_watts(cp_id, configured_watts)
+                _LOGGER.info("Solar Smart: %s off-peak, reset to %.0fW", cp_id, configured_watts)
+            continue
+
+        grid_import = _solar_metrics.get("grid_import", 0)
+        battery_soc = _solar_metrics.get("battery_soc")
+        pv_power = _solar_metrics.get("pv_power", 0)
+
+        tz = _get_tz(cp_id)
+        hour = datetime.now(tz).hour
+        configured_watts = _get_period_limit_for_hour(cp_id, hour)
+
+        throttle = _solar_throttle.get(cp_id, {
+            "throttled_watts": configured_watts,
+            "direction": None,
+            "consecutive": 0,
+        })
+        current_watts = throttle["throttled_watts"]
+
+        if grid_import > SOLAR_GRID_IMPORT_THRESHOLD:
+            # Ramp DOWN — too much grid import
+            if throttle.get("direction") == "down":
+                throttle["consecutive"] += 1
+            else:
+                throttle["direction"] = "down"
+                throttle["consecutive"] = 1
+
+            if throttle["consecutive"] >= SOLAR_DOWN_CHECKS:
+                new_watts = max(current_watts - SOLAR_RAMP_STEP, SOLAR_MIN_WATTS)
+                if new_watts < current_watts:
+                    throttle["throttled_watts"] = new_watts
+                    throttle["consecutive"] = 0
+                    await _apply_throttled_watts(cp_id, new_watts)
+        elif (grid_import <= SOLAR_GRID_IMPORT_THRESHOLD
+              and (battery_soc is None or battery_soc > SOLAR_UP_BATTERY_SOC_MIN)
+              and pv_power > SOLAR_UP_PV_MIN):
+            # Ramp UP — grid is fine, solar is abundant, battery healthy
+            if throttle.get("direction") == "up":
+                throttle["consecutive"] += 1
+            else:
+                throttle["direction"] = "up"
+                throttle["consecutive"] = 1
+
+            if throttle["consecutive"] >= SOLAR_UP_CHECKS:
+                new_watts = min(current_watts + SOLAR_RAMP_STEP, configured_watts)
+                if new_watts > current_watts:
+                    throttle["throttled_watts"] = new_watts
+                    throttle["consecutive"] = 0
+                    await _apply_throttled_watts(cp_id, new_watts)
+        else:
+            # Reset direction tracking if neither condition met
+            throttle["direction"] = None
+            throttle["consecutive"] = 0
+
+        _solar_throttle[cp_id] = throttle
+
+
+async def _solar_smart_loop():
+    """Background task: run Solar Smart throttle check every SOLAR_CHECK_INTERVAL seconds."""
+    while True:
+        try:
+            await _solar_smart_tick()
+        except Exception as e:
+            _LOGGER.error("Solar Smart tick error: %s", e)
+        await asyncio.sleep(SOLAR_CHECK_INTERVAL)
+
 async def handle_schedule_post(request):
     """POST /schedule — Set charging mode and TxDefaultProfile periods.
     
@@ -834,6 +1031,20 @@ async def handle_schedule_post(request):
                 config["timezone"] = tz_name
             else:
                 return web.json_response({"error": f"Invalid timezone: {tz_name}"}, status=400)
+
+        # Solar Smart fields
+        if "solar_smart" in body:
+            config["solar_smart"] = bool(body["solar_smart"])
+        if "off_peak_start_hour" in body:
+            h = int(body["off_peak_start_hour"])
+            if not (0 <= h <= 23):
+                return web.json_response({"error": f"Invalid off_peak_start_hour: {h}"}, status=400)
+            config["off_peak_start_hour"] = h
+        if "off_peak_end_hour" in body:
+            h = int(body["off_peak_end_hour"])
+            if not (0 <= h <= 23):
+                return web.json_response({"error": f"Invalid off_peak_end_hour: {h}"}, status=400)
+            config["off_peak_end_hour"] = h
 
         # Validate and store periods for auto mode
         periods = None
@@ -986,6 +1197,9 @@ async def main():
     if DOCDB_ENABLED:
         await _docdb_ensure_db()
         await _docdb_load_schedules()
+
+    # Start Solar Smart background loop
+    asyncio.create_task(_solar_smart_loop())
 
     app = web.Application()
 

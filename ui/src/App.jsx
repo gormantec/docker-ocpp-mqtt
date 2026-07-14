@@ -31,6 +31,9 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [editPeriods, setEditPeriods] = useState([...DEFAULT_PERIODS]);
   const [editTimezone, setEditTimezone] = useState('Australia/Sydney');
+  const [editSolarSmart, setEditSolarSmart] = useState(false);
+  const [editOffPeakStart, setEditOffPeakStart] = useState(0);
+  const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
   const [timezones, setTimezones] = useState([]);
 
   const fetchData = async () => {
@@ -293,6 +296,9 @@ export default function App() {
                     const cfg = schedule[effectiveCpId] || {};
                     setEditPeriods(cfg.periods ? [...cfg.periods] : [...DEFAULT_PERIODS]);
                     setEditTimezone(cfg.timezone || 'Australia/Sydney');
+                    setEditSolarSmart(cfg.solar_smart || false);
+                    setEditOffPeakStart(cfg.off_peak_start_hour ?? 0);
+                    setEditOffPeakEnd(cfg.off_peak_end_hour ?? 6);
                     setShowConfig(true);
                   }}>⚙</button>
               </div>
@@ -473,6 +479,51 @@ export default function App() {
                       ))}
                     </select>
                   </div>
+                  <div style={{
+                    marginBottom: 16, padding: '12px', background: '#1a2332',
+                    borderRadius: 4, border: '1px solid #3a4552'
+                  }}>
+                    <label style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      cursor: 'pointer', marginBottom: 12
+                    }}>
+                      <input type="checkbox"
+                        checked={editSolarSmart}
+                        onChange={(e) => setEditSolarSmart(e.target.checked)}
+                        style={{ width: 18, height: 18, cursor: 'pointer' }} />
+                      <span style={{ fontWeight: 600, fontSize: 14 }}>
+                        ☀️ Solar Smart
+                      </span>
+                    </label>
+                    <p style={{ fontSize: 12, color: '#95a5a6', marginBottom: 10 }}>
+                      Dynamically throttle charging based on solar/grid balance.
+                      Only active in AUTO mode. Uses power from esy-sunhomes telemetry.
+                    </p>
+                    {editSolarSmart && (
+                      <div style={{ display: 'flex', gap: 16 }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ fontSize: 11, color: '#95a5a6', display: 'block', marginBottom: 3 }}>
+                            Off-Peak Start (0-23)
+                          </label>
+                          <input type="number" min={0} max={23}
+                            value={editOffPeakStart}
+                            onChange={(e) => setEditOffPeakStart(parseInt(e.target.value) || 0)}
+                            style={{ width: '100%', padding: '6px 8px', background: '#0d141e',
+                              border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3 }} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ fontSize: 11, color: '#95a5a6', display: 'block', marginBottom: 3 }}>
+                            Off-Peak End (0-23)
+                          </label>
+                          <input type="number" min={0} max={23}
+                            value={editOffPeakEnd}
+                            onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value) || 0)}
+                            style={{ width: '100%', padding: '6px 8px', background: '#0d141e',
+                              border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3 }} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   <p className="hint" style={{marginBottom: 16, fontSize: 13, color: '#95a5a6'}}>
                     Each period sets a power limit starting at a given hour.
                     Periods are <strong>relative to charging start</strong> (TxDefaultProfile, Relative).
@@ -542,7 +593,13 @@ export default function App() {
                           const res = await fetch(`${BASE}schedule`, {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({cp_id: effectiveCpId, mode: 'auto', periods: sorted, timezone: editTimezone}),
+                            body: JSON.stringify({
+                              cp_id: effectiveCpId, mode: 'auto',
+                              periods: sorted, timezone: editTimezone,
+                              solar_smart: editSolarSmart,
+                              off_peak_start_hour: editOffPeakStart,
+                              off_peak_end_hour: editOffPeakEnd,
+                            }),
                           });
                           const result = await res.json();
                           if (res.ok) {
