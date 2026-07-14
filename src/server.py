@@ -40,6 +40,9 @@ from ocpp.v16.enums import (
     ConfigurationStatus,
     ClearCacheStatus,
     TriggerMessageStatus,
+    ChargingProfileKindType,
+    ChargingProfilePurposeType,
+    RecurrencyKind,
 )
 from ocpp.v16 import call_result as ocpp_result
 from ocpp.v16.call import (
@@ -1180,6 +1183,114 @@ async def handle_timezones(request):
     return web.json_response({"timezones": COMMON_TIMEZONES})
 
 
+async def handle_test_profile(request):
+    """GET /test-profile/{cp_id} — Try Absolute and Recurring TxDefaultProfile.
+    
+    Tests each profile kind against the connected charger and reports
+    which ones are accepted vs rejected.
+    """
+    cp_id = request.match_info.get("cp_id", "")
+    cp = _active_cps.get(cp_id)
+    if not cp:
+        return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
+
+    from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+
+    # Two-period schedule: 4800W 12am-4pm, 1440W 4pm-12am
+    tests = []
+
+    # Test 1: Relative TxDefaultProfile (known working baseline)
+    tests.append(("Relative", SetChargingProfile(
+        connector_id=0,
+        cs_charging_profiles=ChargingProfile(
+            charging_profile_id=1, stack_level=0,
+            charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+            charging_profile_kind=ChargingProfileKindType.relative,
+            charging_schedule=ChargingSchedule(
+                charging_rate_unit="W",
+                charging_schedule_period=[
+                    ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                    ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                ],
+            ),
+        ),
+    )))
+
+    # Test 2: Recurring Daily TxDefaultProfile
+    tests.append(("Recurring+Daily", SetChargingProfile(
+        connector_id=0,
+        cs_charging_profiles=ChargingProfile(
+            charging_profile_id=2, stack_level=0,
+            charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+            charging_profile_kind=ChargingProfileKindType.recurring,
+            recurrency_kind=RecurrencyKind.daily,
+            charging_schedule=ChargingSchedule(
+                charging_rate_unit="W",
+                charging_schedule_period=[
+                    ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                    ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                ],
+            ),
+        ),
+    )))
+
+    # Test 3: Absolute TxDefaultProfile
+    tests.append(("Absolute", SetChargingProfile(
+        connector_id=0,
+        cs_charging_profiles=ChargingProfile(
+            charging_profile_id=3, stack_level=0,
+            charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+            charging_profile_kind=ChargingProfileKindType.absolute,
+            valid_from=today_start.isoformat(),
+            valid_to=(tomorrow_start + timedelta(days=365)).isoformat(),
+            charging_schedule=ChargingSchedule(
+                start_schedule=today_start.isoformat(),
+                duration=86400,
+                charging_rate_unit="W",
+                charging_schedule_period=[
+                    ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                    ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                ],
+            ),
+        ),
+    )))
+
+    results = []
+    for label, call_obj in tests:
+        try:
+            result = await cp.call(call_obj)
+            status = getattr(result, "status", str(result))
+            results.append({"kind": label, "accepted": (status == "Accepted"), "status": status})
+            _LOGGER.info("Test profile %s → %s", label, status)
+        except Exception as e:
+            results.append({"kind": label, "accepted": False, "error": str(e)[:200]})
+            _LOGGER.warning("Test profile %s → ERROR: %s", label, e)
+
+    # Reset to known-good Relative profile
+    await cp.call(SetChargingProfile(
+        connector_id=0,
+        cs_charging_profiles=ChargingProfile(
+            charging_profile_id=1, stack_level=0,
+            charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+            charging_profile_kind=ChargingProfileKindType.relative,
+            charging_schedule=ChargingSchedule(
+                charging_rate_unit="W",
+                charging_schedule_period=[
+                    ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                    ChargingSchedulePeriod(start_period=57600, limit=1440.0),
+                ],
+            ),
+        ),
+    ))
+
+    return web.json_response({"cp_id": cp_id, "results": results})
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1209,6 +1320,7 @@ async def main():
     app.router.add_get("/schedule", handle_schedule_get)
     app.router.add_post("/schedule", handle_schedule_post)
     app.router.add_get("/timezones", handle_timezones)
+    app.router.add_get("/test-profile/{cp_id}", handle_test_profile)
 
     # OCPP WebSocket endpoint — chargers connect via wss://ocpp.gormantec.com/ocpp16/{cp_id}
     app.router.add_get("/ocpp16/{cp_id}", ocpp_ws_handler)
