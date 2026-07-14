@@ -285,7 +285,7 @@ export default function App() {
                 <div style={{display: 'flex', alignItems: 'center', gap: 16, flex: 1, minWidth: 0}}>
                   <h3>⏱ Schedule Control</h3>
                   <span className="schedule-hint" style={{fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
-                    STOP: block all | AUTO: peak/off-peak schedule | CHARGE NOW: full power
+                    STOP: block all | AUTO: daily time-of-day schedule | CHARGE NOW: full power
                   </span>
                 </div>
                 <button className="btn btn-secondary icon-only"
@@ -526,8 +526,8 @@ export default function App() {
                   </div>
                   <p className="hint" style={{marginBottom: 16, fontSize: 13, color: '#95a5a6'}}>
                     Each period sets a power limit starting at a given hour.
-                    Periods are <strong>relative to charging start</strong> (TxDefaultProfile, Relative).
-                    The limit applies until the next period begins.
+                    Schedule repeats <strong>daily</strong> (TxDefaultProfile, Recurring+Daily).
+                    Periods are anchored to midnight. The limit applies until the next period begins.
                   </p>
                   {editPeriods.map((p, i) => (
                     <div key={i} className="info-grid" style={{

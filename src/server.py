@@ -897,9 +897,10 @@ async def _apply_throttled_watts(cp_id: str, watts: float):
             cs_charging_profiles=ChargingProfile(
                 charging_profile_id=1, stack_level=0,
                 charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                charging_profile_kind=ChargingProfileKindType.relative,
+                charging_profile_kind=ChargingProfileKindType.recurring,
+                recurrency_kind=RecurrencyKind.daily,
                 charging_schedule=ChargingSchedule(
-                    charging_rate_unit=ChargingRateUnitType.watts,
+                    charging_rate_unit="W",
                     charging_schedule_period=[
                         ChargingSchedulePeriod(start_period=0, limit=watts),
                     ],
@@ -1099,6 +1100,7 @@ async def handle_schedule_post(request):
 
         elif mode == "auto":
             # Build ChargingSchedulePeriod list from config periods
+            # Use Recurring+Daily: periods anchored to midnight, repeat daily
             cs_periods = []
             for p in periods:
                 cs_periods.append(ChargingSchedulePeriod(
@@ -1106,20 +1108,21 @@ async def handle_schedule_post(request):
                     limit=p["limit_watts"],
                 ))
             desc = ", ".join(f"{p['start_hour']:02d}:00→{p['limit_watts']:.0f}W" for p in periods)
-            _LOGGER.info("AUTO mode for %s — periods: %s", cp_id, desc)
+            _LOGGER.info("AUTO mode for %s — periods (Recurring+Daily): %s", cp_id, desc)
             await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
                     charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
+                    charging_profile_kind=ChargingProfileKindType.recurring,
+                    recurrency_kind=RecurrencyKind.daily,
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=cs_periods,
                     ),
                 ),
             ))
-            _record_event(cp_id, "schedule", f"Mode: AUTO — {desc}")
+            _record_event(cp_id, "schedule", f"Mode: AUTO (Recurring+Daily) — {desc}")
 
         else:  # charge_now
             _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)
