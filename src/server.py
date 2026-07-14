@@ -23,7 +23,7 @@ import json
 import time
 import base64
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 from collections import deque
 
 from aiohttp import web, WSMsgType
@@ -55,8 +55,6 @@ from mqtt_connect import build_mqtt_context
 logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
 
-SYDNEY_TZ = ZoneInfo("Australia/Sydney")
-
 # Charger Basic auth password
 AUTH_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
@@ -65,11 +63,11 @@ AUTH_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 # ---------------------------------------------------------------------------
 
 def _is_charging_allowed(cp_id: str) -> bool:
-    """Check if charging is currently allowed (Sydney timezone).
+    """Check if charging is currently allowed (per-CP timezone with DST).
     
-    stop       → always False (terminate + deny all).
-    auto       → True during peak hours, False during off-peak.
+    stop       → always False.
     charge_now → always True.
+    auto       → True only during peak windows (periods with limit > 0).
     """
     config = _get_schedule(cp_id)
     mode = config.get("mode", "charge_now")
@@ -77,15 +75,19 @@ def _is_charging_allowed(cp_id: str) -> bool:
         return False
     if mode == "charge_now":
         return True
-    # auto (scheduled) — use per-CP peak hours
-    now_syd = datetime.now(SYDNEY_TZ)
-    peak_start = config.get("peak_start_hour", 0)
-    peak_end = config.get("peak_end_hour", 16)
-    if peak_start <= peak_end:
-        return peak_start <= now_syd.hour < peak_end
-    else:
-        # overnight wrap (e.g., 22:00–06:00)
-        return now_syd.hour >= peak_start or now_syd.hour < peak_end
+    # auto: check if current hour (in CP's timezone) has a non-zero limit
+    tz = _get_tz(cp_id)
+    now = datetime.now(tz)
+    periods = config.get("periods", DEFAULT_SCHEDULE["periods"])
+    # Find the active period: the one with the largest start_hour <= current hour
+    active = None
+    for p in sorted(periods, key=lambda x: x["start_hour"]):
+        if p["start_hour"] <= now.hour:
+            active = p
+    if active is None:
+        # Before first period: allow if any period has limit > 0
+        return any(p.get("limit_watts", 0) > 0 for p in periods)
+    return active.get("limit_watts", 0) > 0
 
 # ---------------------------------------------------------------------------
 # Safe env helpers
@@ -643,13 +645,61 @@ _tx_ids: dict[str, int] = {}
 _schedule_configs: dict[str, dict] = {}
 
 # Default schedule config
+# Default schedule config — periods map to TxDefaultProfile ChargingSchedulePeriod
+# Each period: {start_hour: 0-23, limit_watts: 0-50000}
+# Periods are relative to charging start (ChargingProfileKindType.relative)
 DEFAULT_SCHEDULE = {
     "mode": "charge_now",
-    "peak_start_hour": 0,
-    "peak_end_hour": 16,
-    "peak_watts": 4800.0,
-    "off_peak_watts": 1440.0,
+    "timezone": "Australia/Sydney",
+    "periods": [
+        {"start_hour": 0, "limit_watts": 4800.0},
+        {"start_hour": 16, "limit_watts": 1440.0},
+    ],
 }
+
+# Common timezones for UI dropdown
+COMMON_TIMEZONES = sorted([
+    "Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane",
+    "Australia/Perth", "Australia/Adelaide", "Australia/Darwin",
+    "Pacific/Auckland", "Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore",
+    "Asia/Kolkata", "Asia/Dubai", "Europe/London", "Europe/Paris",
+    "Europe/Berlin", "America/New_York", "America/Chicago",
+    "America/Denver", "America/Los_Angeles", "UTC",
+])
+
+
+def _get_tz(cp_id: str) -> ZoneInfo:
+    """Get the timezone for a charge point, with error fallback."""
+    tz_name = _get_schedule(cp_id).get("timezone", "Australia/Sydney")
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _validate_periods(periods):
+    """Validate and normalize schedule periods. Returns (ok, normalized_or_error)."""
+    if not periods or not isinstance(periods, list) or len(periods) == 0:
+        return False, "At least one period is required"
+    out = []
+    for p in periods:
+        sh = p.get("start_hour")
+        lw = p.get("limit_watts")
+        if sh is None or not isinstance(sh, (int, float)) or sh < 0 or sh > 23:
+            return False, f"Invalid start_hour: {sh} (must be 0-23)"
+        if lw is None or not isinstance(lw, (int, float)) or lw < 0 or lw > 50000:
+            return False, f"Invalid limit_watts: {lw} (must be 0-50000)"
+        out.append({"start_hour": int(sh), "limit_watts": float(lw)})
+    # Sort by start_hour ascending
+    out.sort(key=lambda p: p["start_hour"])
+    # Deduplicate start_hour
+    seen = set()
+    deduped = []
+    for p in out:
+        if p["start_hour"] not in seen:
+            seen.add(p["start_hour"])
+            deduped.append(p)
+    return True, deduped
 
 
 # ---------------------------------------------------------------------------
@@ -747,10 +797,20 @@ def _get_schedule(cp_id: str) -> dict:
     return _schedule_configs.get(cp_id, dict(DEFAULT_SCHEDULE))
 
 async def handle_schedule_post(request):
-    """POST /schedule — Set charging mode per charge point.
-    Body: {"cp_id": "4b8609", "mode": "stop"|"auto"|"charge_now",
-           "peak_watts": 4800, "off_peak_watts": 1440,
-           "peak_start_hour": 0, "peak_end_hour": 16}
+    """POST /schedule — Set charging mode and TxDefaultProfile periods.
+    
+    Body: {
+        "cp_id": "4b8609",
+        "mode": "stop"|"auto"|"charge_now",
+        "periods": [                          // only for mode="auto"
+            {"start_hour": 0, "limit_watts": 4800},
+            {"start_hour": 16, "limit_watts": 1440}
+        ]
+    }
+    
+    Periods map directly to OCPP ChargingSchedulePeriod:
+      start_period = start_hour * 3600 (seconds from charging start)
+      limit = limit_watts (watts, StarCharge only accepts W not A)
     """
     try:
         body = await request.json()
@@ -764,26 +824,33 @@ async def handle_schedule_post(request):
         if not cp:
             return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
 
-        # Build config from body + defaults
         config = _get_schedule(cp_id)
         config["mode"] = mode
-        if "peak_watts" in body:
-            config["peak_watts"] = float(body["peak_watts"])
-        if "off_peak_watts" in body:
-            config["off_peak_watts"] = float(body["off_peak_watts"])
-        if "peak_start_hour" in body:
-            config["peak_start_hour"] = int(body["peak_start_hour"])
-        if "peak_end_hour" in body:
-            config["peak_end_hour"] = int(body["peak_end_hour"])
+
+        # Update timezone if provided
+        if "timezone" in body:
+            tz_name = body["timezone"]
+            if tz_name in available_timezones():
+                config["timezone"] = tz_name
+            else:
+                return web.json_response({"error": f"Invalid timezone: {tz_name}"}, status=400)
+
+        # Validate and store periods for auto mode
+        periods = None
+        if mode == "auto":
+            raw_periods = body.get("periods")
+            if raw_periods:
+                ok, result = _validate_periods(raw_periods)
+                if not ok:
+                    return web.json_response({"error": result}, status=400)
+                periods = result
+            else:
+                # Use defaults or existing
+                periods = config.get("periods", DEFAULT_SCHEDULE["periods"])
+            config["periods"] = periods
+
         _schedule_configs[cp_id] = config
         _schedule_state[cp_id] = {"mode": mode}  # backward compat
-
-        peak_w = config["peak_watts"]
-        off_w = config["off_peak_watts"]
-        start_h = config["peak_start_hour"]
-        end_h = config["peak_end_hour"]
-        start_s = start_h * 3600
-        end_s = end_h * 3600
 
         from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
         from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
@@ -817,14 +884,15 @@ async def handle_schedule_post(request):
             _record_event(cp_id, "schedule", "Mode: STOP — charging blocked")
 
         elif mode == "auto":
-            periods = [
-                ChargingSchedulePeriod(start_period=start_s, limit=peak_w),
-            ]
-            # Off-peak starts at end_hour
-            if end_s > start_s:
-                periods.append(ChargingSchedulePeriod(start_period=end_s, limit=off_w))
-            _LOGGER.info("AUTO mode for %s — peak %dW (%d:00-%d:00), off-peak %dW",
-                         cp_id, int(peak_w), start_h, end_h, int(off_w))
+            # Build ChargingSchedulePeriod list from config periods
+            cs_periods = []
+            for p in periods:
+                cs_periods.append(ChargingSchedulePeriod(
+                    start_period=p["start_hour"] * 3600,
+                    limit=p["limit_watts"],
+                ))
+            desc = ", ".join(f"{p['start_hour']:02d}:00→{p['limit_watts']:.0f}W" for p in periods)
+            _LOGGER.info("AUTO mode for %s — periods: %s", cp_id, desc)
             await cp.call(SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
@@ -833,12 +901,11 @@ async def handle_schedule_post(request):
                     charging_profile_kind=ChargingProfileKindType.relative,
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=periods,
+                        charging_schedule_period=cs_periods,
                     ),
                 ),
             ))
-            _record_event(cp_id, "schedule",
-                          f"Mode: AUTO (peak {int(peak_w)}W {start_h}:00-{end_h}:00, off-peak {int(off_w)}W)")
+            _record_event(cp_id, "schedule", f"Mode: AUTO — {desc}")
 
         else:  # charge_now
             _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)
@@ -855,7 +922,7 @@ async def handle_schedule_post(request):
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
                         charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=peak_w),
+                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
                         ],
                     ),
                 ),
@@ -893,7 +960,13 @@ async def handle_schedule_get(request):
         "schedule_state": _schedule_state,  # backward compat
         "schedule_configs": configs,
         "active_cps": list(_active_cps.keys()),
+        "timezones": COMMON_TIMEZONES,
     })
+
+
+async def handle_timezones(request):
+    """GET /timezones — List available timezones for schedule config."""
+    return web.json_response({"timezones": COMMON_TIMEZONES})
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +994,7 @@ async def main():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/schedule", handle_schedule_get)
     app.router.add_post("/schedule", handle_schedule_post)
+    app.router.add_get("/timezones", handle_timezones)
 
     # OCPP WebSocket endpoint — chargers connect via wss://ocpp.gormantec.com/ocpp16/{cp_id}
     app.router.add_get("/ocpp16/{cp_id}", ocpp_ws_handler)

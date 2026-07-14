@@ -14,6 +14,11 @@ const STATUS_COLORS = {
   Reserved: '#FF9900',
 };
 
+const DEFAULT_PERIODS = [
+  { start_hour: 0, limit_watts: 4800 },
+  { start_hour: 16, limit_watts: 1440 },
+];
+
 export default function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -23,6 +28,10 @@ export default function App() {
   const [schedulePending, setSchedulePending] = useState(false);
   const [scheduleMsg, setScheduleMsg] = useState(null);
   const [selectedCpId, setSelectedCpId] = useState(null);
+  const [showConfig, setShowConfig] = useState(false);
+  const [editPeriods, setEditPeriods] = useState([...DEFAULT_PERIODS]);
+  const [editTimezone, setEditTimezone] = useState('Australia/Sydney');
+  const [timezones, setTimezones] = useState([]);
 
   const fetchData = async () => {
     try {
@@ -39,6 +48,7 @@ export default function App() {
         try {
           const schedJson = await schedRes.json();
           setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {});
+          if (schedJson.timezones) setTimezones(schedJson.timezones);
         } catch {}
       }
     } catch (e) {
@@ -57,7 +67,6 @@ export default function App() {
   const chargePoints = data?.charge_points || [];
   const connectedCps = chargePoints.filter(cp => cp.connected);
   const connectedCount = connectedCps.length;
-  const totalCount = chargePoints.length;
 
   // Auto-select: first connected CP, else first in list, else null
   const effectiveCpId = selectedCpId || (connectedCps[0]?.id) || (chargePoints[0]?.id) || null;
@@ -129,12 +138,6 @@ export default function App() {
               </div>
               <div className="summary-card">
                 <div className="summary-value">
-                  {totalCount}
-                </div>
-                <div className="summary-label">Total Charge Points</div>
-              </div>
-              <div className="summary-card">
-                <div className="summary-value">
                   {chargePoints.filter(cp => cp.status === 'Charging').length}
                 </div>
                 <div className="summary-label">Charging</div>
@@ -142,16 +145,16 @@ export default function App() {
               <div className="summary-card">
                 <div className="summary-value text-green">
                   {(() => {
-                    const now = new Date();
-                    const sydHour = (now.getUTCHours() + 10) % 24;
                     const schedCfg = schedule[effectiveCpId] || {};
-                    const peakEnd = schedCfg.peak_end_hour ?? 16;
-                    if (sydHour < peakEnd) return `${peakEnd - sydHour}h peak left`;
-                    const peakStart = schedCfg.peak_start_hour ?? 0;
-                    return `${(24 - sydHour) + peakStart}h off-peak`;
+                    const periods = schedCfg.periods || [];
+                    const mode = schedCfg.mode || 'charge_now';
+                    if (mode === 'stop') return 'BLOCKED';
+                    if (mode === 'charge_now') return 'FULL';
+                    // Show count of periods for auto mode
+                    return `${periods.length} windows`;
                   })()}
                 </div>
-                <div className="summary-label">Peak Hours Today</div>
+                <div className="summary-label">Schedule</div>
               </div>
               <div className="summary-card">
                 <div className={`summary-value ${data.uptime_seconds > 60 ? 'text-green' : 'text-warn'}`}>
@@ -277,10 +280,10 @@ export default function App() {
                     {(() => {
                       const schedCfg = schedule[effectiveCpId] || {};
                       const mode = schedCfg.mode || 'charge_now';
-                      const peakW = schedCfg.peak_watts || 4800;
-                      const offW = schedCfg.off_peak_watts || 1440;
-                      const peakStart = schedCfg.peak_start_hour ?? 0;
-                      const peakEnd = schedCfg.peak_end_hour ?? 16;
+                      const periods = schedCfg.periods || DEFAULT_PERIODS;
+                      const periodStr = periods.map(p =>
+                        `${p.start_hour}:00→${p.limit_watts}W`
+                      ).join(', ');
                       return (
                         <>
                           <div className="info-grid" style={{ marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid #3a4552' }}>
@@ -292,20 +295,43 @@ export default function App() {
                                 </span>
                               </span>
                             </div>
-                            <div className="info-item" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                              <button className={`btn ${mode === 'stop' ? 'btn-danger' : 'btn-secondary'}`}
-                                disabled={schedulePending || mode === 'stop'}
-                                onClick={() => setScheduleMode(effectiveCpId, 'stop')}>🛑 STOP</button>
-                              <button className={`btn ${mode === 'auto' ? 'btn-primary' : 'btn-secondary'}`}
-                                disabled={schedulePending || mode === 'auto'}
-                                onClick={() => setScheduleMode(effectiveCpId, 'auto')}>⏱ AUTO</button>
-                              <button className={`btn ${mode === 'charge_now' ? 'btn-charge' : 'btn-secondary'}`}
-                                disabled={schedulePending || mode === 'charge_now'}
-                                onClick={() => setScheduleMode(effectiveCpId, 'charge_now')}>⚡ CHARGE NOW</button>
+                            <div className="info-item" style={{ display: 'flex', gap: 0, alignItems: 'center' }}>
+                              <div className="toggle-group" style={{
+                                display: 'inline-flex', borderRadius: 4,
+                                overflow: 'hidden', border: '1px solid #3a4552'
+                              }}>
+                                <button className={`toggle-btn ${mode === 'stop' ? 'toggle-active-danger' : ''}`}
+                                  disabled={schedulePending}
+                                  onClick={() => setScheduleMode(effectiveCpId, 'stop')}
+                                  style={toggleStyle(mode === 'stop', '#D13212')}>
+                                  🛑 STOP
+                                </button>
+                                <button className={`toggle-btn ${mode === 'auto' ? 'toggle-active-primary' : ''}`}
+                                  disabled={schedulePending}
+                                  onClick={() => setScheduleMode(effectiveCpId, 'auto')}
+                                  style={toggleStyle(mode === 'auto', '#0073BB')}>
+                                  ⏱ AUTO
+                                </button>
+                                <button className={`toggle-btn ${mode === 'charge_now' ? 'toggle-active-charge' : ''}`}
+                                  disabled={schedulePending}
+                                  onClick={() => setScheduleMode(effectiveCpId, 'charge_now')}
+                                  style={toggleStyle(mode === 'charge_now', '#0A7D4C')}>
+                                  ⚡ CHARGE NOW
+                                </button>
+                              </div>
+                              <button className="btn btn-secondary"
+                                style={{ marginLeft: 12 }}
+                                disabled={schedulePending}
+                                onClick={() => {
+                                  const cfg = schedule[effectiveCpId] || {};
+                                  setEditPeriods(cfg.periods ? [...cfg.periods] : [...DEFAULT_PERIODS]);
+                                  setEditTimezone(cfg.timezone || 'Australia/Sydney');
+                                  setShowConfig(true);
+                                }}>⚙ Configure</button>
                             </div>
                           </div>
                           <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
-                            <strong>AUTO:</strong> Peak {peakStart}:00–{peakEnd}:00 ({peakW}W) | Off-peak ({offW}W) Sydney time
+                            <strong>AUTO:</strong> {periodStr}
                           </div>
                         </>
                       );
@@ -392,11 +418,146 @@ export default function App() {
               </div>
             </div>
 
+            {/* Period Configuration Modal */}
+            {showConfig && (
+            <div className="modal-overlay" style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex',
+              alignItems: 'center', justifyContent: 'center', zIndex: 1000
+            }} onClick={(e) => { if (e.target === e.currentTarget) setShowConfig(false); }}>
+              <div className="modal-content card" style={{
+                width: 520, maxHeight: '80vh', overflow: 'auto',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+              }}>
+                <div className="card-header">
+                  <h3>⚙ Configure Schedule — {effectiveCpId}</h3>
+                  <button className="btn btn-secondary" style={{padding: '4px 10px'}}
+                    onClick={() => setShowConfig(false)}>✕</button>
+                </div>
+                <div className="card-body">
+                  <div style={{marginBottom: 16}}>
+                    <label style={{fontSize: 12, color: '#95a5a6', display: 'block', marginBottom: 4}}>
+                      Timezone (with DST)
+                    </label>
+                    <select value={editTimezone}
+                      onChange={(e) => setEditTimezone(e.target.value)}
+                      style={{
+                        width: '100%', padding: '8px', background: '#0d141e',
+                        border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3
+                      }}>
+                      {(timezones.length > 0 ? timezones : ['Australia/Sydney', 'UTC']).map(tz => (
+                        <option key={tz} value={tz}>{tz}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <p className="hint" style={{marginBottom: 16, fontSize: 13, color: '#95a5a6'}}>
+                    Each period sets a power limit starting at a given hour.
+                    Periods are <strong>relative to charging start</strong> (TxDefaultProfile, Relative).
+                    The limit applies until the next period begins.
+                  </p>
+                  {editPeriods.map((p, i) => (
+                    <div key={i} className="info-grid" style={{
+                      marginBottom: 8, padding: '8px 12px',
+                      backgroundColor: '#1a2332', borderRadius: 4,
+                      display: 'flex', alignItems: 'center', gap: 12
+                    }}>
+                      <div style={{flex: 1}}>
+                        <label style={{fontSize: 11, color: '#95a5a6', display: 'block'}}>
+                          Start Hour (0-23)
+                        </label>
+                        <input type="number" min={0} max={23}
+                          value={p.start_hour}
+                          onChange={(e) => {
+                            const next = [...editPeriods];
+                            next[i] = {...next[i], start_hour: parseInt(e.target.value) || 0};
+                            setEditPeriods(next);
+                          }}
+                          style={{
+                            width: '100%', padding: '6px 8px', background: '#0d141e',
+                            border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3
+                          }} />
+                      </div>
+                      <div style={{flex: 2}}>
+                        <label style={{fontSize: 11, color: '#95a5a6', display: 'block'}}>
+                          Limit (Watts)
+                        </label>
+                        <input type="number" min={0} max={50000} step={100}
+                          value={p.limit_watts}
+                          onChange={(e) => {
+                            const next = [...editPeriods];
+                            next[i] = {...next[i], limit_watts: parseFloat(e.target.value) || 0};
+                            setEditPeriods(next);
+                          }}
+                          style={{
+                            width: '100%', padding: '6px 8px', background: '#0d141e',
+                            border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3
+                          }} />
+                      </div>
+                      <button className="btn btn-danger" style={{padding: '4px 8px', marginTop: 14}}
+                        disabled={editPeriods.length <= 1}
+                        onClick={() => setEditPeriods(editPeriods.filter((_, idx) => idx !== i))}>
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button className="btn btn-secondary" style={{marginTop: 8}}
+                    onClick={() => setEditPeriods([...editPeriods, {start_hour: 0, limit_watts: 1000}])}>
+                    + Add Period
+                  </button>
+                  <div className="hint" style={{fontSize: 11, color: '#95a5a6', marginTop: 8}}>
+                    Preview: {editPeriods.sort((a,b) => a.start_hour - b.start_hour).map(p => `${p.start_hour}:00→${p.limit_watts}W`).join(', ')}
+                  </div>
+                  <div style={{display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end'}}>
+                    <button className="btn btn-secondary" onClick={() => setShowConfig(false)}>Cancel</button>
+                    <button className="btn btn-primary"
+                      disabled={schedulePending}
+                      onClick={async () => {
+                        setSchedulePending(true);
+                        setShowConfig(false);
+                        try {
+                          const sorted = [...editPeriods].sort((a,b) => a.start_hour - b.start_hour);
+                          const res = await fetch(`${BASE}schedule`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({cp_id: effectiveCpId, mode: 'auto', periods: sorted, timezone: editTimezone}),
+                          });
+                          const result = await res.json();
+                          if (res.ok) {
+                            setScheduleMsg({type: 'success', text: `${effectiveCpId}: schedule updated — ${sorted.map(p => `${p.start_hour}:00→${p.limit_watts}W`).join(', ')}`});
+                            const schedRes = await fetch(`${BASE}schedule`);
+                            if (schedRes.ok) {
+                              const schedJson = await schedRes.json();
+                              setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {});
+                            }
+                          } else {
+                            setScheduleMsg({type: 'error', text: result.error || 'Failed to save'});
+                          }
+                        } catch (e) {
+                          setScheduleMsg({type: 'error', text: 'Connection issue'});
+                        } finally {
+                          setSchedulePending(false);
+                        }
+                      }}>💾 Save &amp; Apply</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           </>
         )}
       </main>
     </div>
   );
+}
+
+function toggleStyle(active, color) {
+  return {
+    padding: '8px 16px', fontSize: 13, fontWeight: 600,
+    border: 'none', cursor: 'pointer',
+    backgroundColor: active ? color : '#1a2332',
+    color: active ? '#fff' : '#95a5a6',
+    transition: 'background 0.15s',
+  };
 }
 
 function getEventBadge(type) {
