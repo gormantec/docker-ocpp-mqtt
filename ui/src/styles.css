@@ -116,6 +116,7 @@ body {
 
 @media (max-width: 640px) {
   .summary-cards { display: none; }
+  .schedule-hint { display: none; }
   .summary-mobile {
     display: block;
     background: var(--aws-white);
@@ -273,6 +274,18 @@ body {
   border-color: var(--aws-border);
 }
 .btn-secondary:hover:not(:disabled) { background: #F0F2F3; }
+
+/* Icon-only buttons (in card headers) */
+.btn-secondary.icon-only {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--aws-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-secondary.icon-only:hover { background: rgba(0,0,0,0.06); color: var(--aws-text); }
+.btn-secondary.icon-only:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ===== Alert ===== */
 .alert {

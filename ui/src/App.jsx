@@ -279,10 +279,22 @@ export default function App() {
             {/* Schedule Control */}
             <div className="card">
               <div className="card-header">
-                <h3>⏱ Schedule Control</h3>
-                <span className="text-secondary" style={{fontSize: 12}}>
-                  STOP: block all | AUTO: peak/off-peak schedule | CHARGE NOW: full power
-                </span>
+                <div style={{display: 'flex', alignItems: 'center', gap: 16, flex: 1, minWidth: 0}}>
+                  <h3>⏱ Schedule Control</h3>
+                  <span className="schedule-hint" style={{fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
+                    STOP: block all | AUTO: peak/off-peak schedule | CHARGE NOW: full power
+                  </span>
+                </div>
+                <button className="btn btn-secondary icon-only"
+                  style={{padding: '6px 10px', fontSize: 16, lineHeight: 1, flexShrink: 0}}
+                  disabled={schedulePending || !selectedCp?.connected}
+                  title="Configure schedule periods"
+                  onClick={() => {
+                    const cfg = schedule[effectiveCpId] || {};
+                    setEditPeriods(cfg.periods ? [...cfg.periods] : [...DEFAULT_PERIODS]);
+                    setEditTimezone(cfg.timezone || 'Australia/Sydney');
+                    setShowConfig(true);
+                  }}>⚙</button>
               </div>
               <div className="card-body">
                 {!effectiveCpId ? (
@@ -339,15 +351,6 @@ export default function App() {
                                   ⚡ CHARGE NOW
                                 </button>
                               </div>
-                              <button className="btn btn-secondary"
-                                style={{ marginLeft: 12 }}
-                                disabled={schedulePending}
-                                onClick={() => {
-                                  const cfg = schedule[effectiveCpId] || {};
-                                  setEditPeriods(cfg.periods ? [...cfg.periods] : [...DEFAULT_PERIODS]);
-                                  setEditTimezone(cfg.timezone || 'Australia/Sydney');
-                                  setShowConfig(true);
-                                }}>⚙ Configure</button>
                             </div>
                           </div>
                           <div className="hint" style={{ fontSize: 12, color: '#95a5a6' }}>
