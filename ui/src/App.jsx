@@ -164,6 +164,26 @@ export default function App() {
               </div>
             </div>
 
+            {/* Mobile Summary Tile */}
+            <div className="summary-mobile">
+              <div className="summary-mobile-grid">
+                <span className="summary-mobile-label">Connected</span>
+                <span className={`summary-mobile-value ${connectedCount > 0 ? 'text-green' : 'text-red'}`}>{connectedCount}</span>
+                <span className="summary-mobile-label">Charging</span>
+                <span className="summary-mobile-value">{chargePoints.filter(cp => cp.status === 'Charging').length}</span>
+                <span className="summary-mobile-label">Schedule</span>
+                <span className="summary-mobile-value text-green">{(() => {
+                  const schedCfg = schedule[effectiveCpId] || {};
+                  const mode = schedCfg.mode || 'charge_now';
+                  if (mode === 'stop') return 'BLOCKED';
+                  if (mode === 'charge_now') return 'FULL';
+                  return `${(schedCfg.periods || []).length} windows`;
+                })()}</span>
+                <span className="summary-mobile-label">Uptime</span>
+                <span className={`summary-mobile-value ${data.uptime_seconds > 60 ? 'text-green' : 'text-warn'}`}>{Math.floor((data.uptime_seconds || 0) / 60)}m</span>
+              </div>
+            </div>
+
             {/* Charge Point Selector */}
             {chargePoints.length > 0 && (
               <div className="cp-selector" style={{

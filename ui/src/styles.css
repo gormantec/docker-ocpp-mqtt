@@ -110,6 +110,39 @@ body {
   margin-bottom: 20px;
 }
 
+.summary-mobile {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .summary-cards { display: none; }
+  .summary-mobile {
+    display: block;
+    background: var(--aws-white);
+    border: 1px solid var(--aws-border);
+    border-radius: 4px;
+    padding: 16px;
+    margin-bottom: 20px;
+    box-shadow: var(--aws-shadow);
+  }
+  .summary-mobile-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px 16px;
+    align-items: center;
+  }
+  .summary-mobile-label {
+    font-size: 13px;
+    color: var(--aws-text-secondary);
+    font-weight: 500;
+  }
+  .summary-mobile-value {
+    font-size: 15px;
+    font-weight: 700;
+    text-align: right;
+  }
+}
+
 .summary-card {
   background: var(--aws-white);
   border: 1px solid var(--aws-border);
