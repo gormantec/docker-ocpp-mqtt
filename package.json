@@ -9,6 +9,6 @@
     "build:push": "docker build -t ghcr.io/gormantec/docker-ocpp-mqtt:latest . && docker push ghcr.io/gormantec/docker-ocpp-mqtt:latest"
   },
   "devDependencies": {
-    "@gormantec/iot-cli": "^1.0.23"
+    "@gormantec/iot-cli": "^1.0.30"
   }
 }
