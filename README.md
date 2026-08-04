@@ -58,6 +58,46 @@ Publish a JSON message to `ocpp/{charge_point_id}/cmd`:
 
 Supported actions: `RemoteStartTransaction`, `RemoteStopTransaction`, `Reset`, `UnlockConnector`, `GetConfiguration`, `ChangeConfiguration`, `ClearCache`, `TriggerMessage`
 
+## Charging Logic
+
+Each charge point (CP) has its own schedule config, persisted to DocumentDB. The UI provides a **STOP / AUTO / CHARGE NOW** toggle per CP.
+
+### Schedule Modes
+
+| Mode | Behavior |
+|------|----------|
+| 🛑 **STOP** | All charging blocked. `RemoteStopTransaction` sent to any active session. New `Authorize` requests rejected. |
+| ⏱ **AUTO** | Time-of-day schedule with configurable periods. Each period defines a watt limit for a starting hour. The active period's `limit_watts` determines whether charging is allowed (limit > 0 = allowed). |
+| ⚡ **CHARGE NOW** | Full power — no restrictions. Always allows charging. |
+
+### AUTO Mode - Periods
+
+Periods are defined as `{start_hour, limit_watts}` pairs, sorted by hour. The active period is the one with the largest `start_hour <= current_hour`. If `limit_watts` is 0, charging is blocked during that window. The schedule repeats daily.
+
+```
+Example:
+  00:00 → 4800W  (overnight — full power)
+  16:00 → 1440W  (peak — reduced)
+```
+
+### Solar Smart (optional, AUTO mode only)
+
+When `solar_smart: true` and mode is AUTO, the bridge dynamically throttles charging power based on live solar/grid telemetry from ESY Sunhomes (MQTT):
+
+- **Off-Peak window** (`off_peak_start_hour` to `off_peak_end_hour`): Resets to the configured period rate — no throttling. Grid import is allowed during off-peak.
+- **Peak window**: Throttles down when grid import exceeds 500W. Ramps up slowly (10 min of sustained export required) with PV ≥ 500W and battery SOC > 30%.
+- Ramp step: 480W per check. Floor: 1440W minimum.
+- Throttle is per-CP and communicated via OCPP `SetChargingProfile` (TxDefaultProfile, Recurring+Daily).
+
+### Data Sources (Web UI)
+
+| Card | Source |
+|------|--------|
+| **Charging Power** | Live `Power.Active.Import` from OCPP MeterValues per connector |
+| **Grid Export** | ESY Sunhomes MQTT telemetry (`gridExport`) |
+| **Battery SOC** | ESY Sunhomes MQTT telemetry (`batterySoc`) |
+| **Power Distribution** | Bar chart: PV, Grid Out, Grid In, Charging (total) |
+
 ## Configuration
 
 All settings via environment variables:

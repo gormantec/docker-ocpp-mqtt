@@ -173,7 +173,8 @@ def _record_event(cp_id: str, event_type: str, summary: str = ""):
     if cp_id not in _cp_state:
         _cp_state[cp_id] = {"id": cp_id, "connected": True, "status": "unknown",
                             "connector_id": None, "last_event": None,
-                            "connectors": {}}  # per-connector -> status
+                            "connectors": {},  # per-connector -> status
+                            "meter_values": {}}  # per-connector -> {power, energy, timestamp}
     _cp_state[cp_id]["last_event"] = event["time"]
 
 
@@ -196,6 +197,7 @@ class MqttChargePoint(BaseChargePoint):
             "id": cp_id, "connected": True, "status": "unknown",
             "connector_id": None, "last_event": datetime.now(timezone.utc).isoformat(),
             "connectors": {},  # per-connector -> status
+            "meter_values": {},  # per-connector -> {power, energy, timestamp}
         }
         _LOGGER.info("Charge point connected: %s", cp_id)
 
@@ -335,6 +337,33 @@ class MqttChargePoint(BaseChargePoint):
         _LOGGER.debug("MeterValues from %s: connector=%s", self.id, connector_id)
         payload = {"connector_id": connector_id, "meter_value": meter_value}
         await _mqtt_publish(_cp_topic(self.id, "meter_values"), payload)
+
+        # Extract live power/energy readings for the UI
+        cp = _cp_state.get(self.id)
+        if cp and isinstance(meter_value, list) and len(meter_value) > 0:
+            conn_key = str(connector_id) if connector_id is not None else "0"
+            mv = meter_value[0]  # first MeterValue entry
+            sampled = mv.get("sampledValue", []) if isinstance(mv, dict) else []
+            power = None
+            energy = None
+            for sv in sampled:
+                measurand = sv.get("measurand", "")
+                if "Power.Active.Import" in measurand:
+                    try:
+                        power = float(sv.get("value", 0))
+                    except (ValueError, TypeError):
+                        pass
+                elif "Energy.Active.Import.Register" in measurand:
+                    try:
+                        energy = float(sv.get("value", 0))
+                    except (ValueError, TypeError):
+                        pass
+            cp["meter_values"][conn_key] = {
+                "power": power,
+                "energy": energy,
+                "timestamp": mv.get("timestamp", datetime.now(timezone.utc).isoformat()) if isinstance(mv, dict) else datetime.now(timezone.utc).isoformat(),
+            }
+
         return ocpp_result.MeterValues()
 
     @on("DataTransfer")
