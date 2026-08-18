@@ -1282,9 +1282,17 @@ async def handle_schedule_post(request):
 
         async def safe_cp_call(label: str, call_obj):
             """Run OCPP call with timeout so HTTP schedule endpoint cannot hang."""
+            task = asyncio.create_task(cp.call(call_obj))
             try:
-                return await asyncio.wait_for(cp.call(call_obj), timeout=SCHEDULE_OCPP_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
+                done, _ = await asyncio.wait({task}, timeout=SCHEDULE_OCPP_TIMEOUT_SECONDS)
+                if not done:
+                    task.cancel()
+                    msg = f"{label} timed out after {SCHEDULE_OCPP_TIMEOUT_SECONDS:.0f}s"
+                    _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
+                    call_warnings.append(msg)
+                    return None
+                return task.result()
+            except asyncio.CancelledError:
                 msg = f"{label} timed out after {SCHEDULE_OCPP_TIMEOUT_SECONDS:.0f}s"
                 _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
                 call_warnings.append(msg)
