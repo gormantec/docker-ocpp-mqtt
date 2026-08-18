@@ -40,7 +40,7 @@ Parameters:
     Default: '9094'
   DOCDB_URL:
     Type: String
-    Default: http://docker-iot_docdb:5984
+    Default: http://docdb-ocpp-mqtt-db:5984
     Description: CouchDB endpoint for schedule persistence
   DOCDB_USER:
     Type: String
@@ -49,6 +49,13 @@ Parameters:
     Type: String
     Default: '{{resolve:secretsmanager:gormantec.com/DOCDB_PASSWORD:SecretString}}'
     NoEcho: true
+  DOCDB_DB:
+    Type: String
+    Default: ocpp_mqtt
+    Description: Dedicated OCPP DocumentDB database name
+  DocDBPort:
+    Type: String
+    Default: "5984"
   ESY_THING_NAME:
     Type: String
     Default: gormantec-battery1
@@ -59,6 +66,40 @@ Resources:
     Properties:
       Name: DOCDB_PASSWORD
       Description: DocumentDB master password (from SECRET_DOCDB_PASSWORD)
+  DocDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow CouchDB HTTP access from ECS tasks
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref DocDBPort
+          ToPort: !Ref DocDBPort
+          CidrIp: 0.0.0.0/0
+  DocDBSubnetGroup:
+    Type: AWS::DocDB::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for OCPP DocumentDB
+      SubnetIds:
+        - subnet-default
+  OcppDocDBCluster:
+    Type: AWS::DocDB::DBCluster
+    Properties:
+      DBClusterIdentifier: ocpp-mqtt-db
+      Engine: docdb
+      MasterUsername:
+        Ref: DOCDB_USER
+      MasterUserPassword:
+        Ref: DOCDB_PASSWORD
+      Port: !Ref DocDBPort
+      DBSubnetGroupName: !Ref DocDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DocDBSecurityGroup
+  OcppDocDBInstance:
+    Type: AWS::DocDB::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref OcppDocDBCluster
+      DBInstanceClass: db.t3.medium
+      DBInstanceIdentifier: ocpp-mqtt-db-1
   OcppMqttLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -123,6 +164,9 @@ Resources:
             - Name: DOCDB_PASSWORD
               Value:
                 Ref: DOCDB_PASSWORD
+            - Name: DOCDB_DB
+              Value:
+                Ref: DOCDB_DB
             - Name: ESY_THING_NAME
               Value:
                 Ref: ESY_THING_NAME
@@ -155,3 +199,12 @@ Outputs:
   LogGroup:
     Description: CloudWatch Log Group for container logs
     Value: /ecs/ocpp-mqtt
+  DocDBEndpoint:
+    Description: DocumentDB (CouchDB) connection URL
+    Value: OcppDocDBCluster.Endpoint
+  DocDBClusterId:
+    Description: DocumentDB cluster identifier
+    Value: !Ref OcppDocDBCluster
+  DocDBPasswordSecretArn:
+    Description: ARN of the DOCDB_PASSWORD secret
+    Value: !Ref DocDBPasswordSecret
