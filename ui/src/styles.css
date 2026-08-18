@@ -105,8 +105,8 @@ body {
 /* ===== Summary Cards ===== */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
   margin-bottom: 20px;
 }
 
@@ -115,7 +115,11 @@ body {
 }
 
 @media (max-width: 640px) {
-  .summary-cards { display: none; }
+  .summary-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
   .schedule-hint { display: none; }
   .summary-mobile {
     display: block;
@@ -164,7 +168,7 @@ body {
 }
 
 .summary-value {
-  font-size: 32px;
+  font-size: 24px;
   font-weight: 700;
   margin-bottom: 4px;
 }
@@ -173,6 +177,39 @@ body {
   font-size: 13px;
   color: var(--aws-text-secondary);
   font-weight: 500;
+}
+
+.graph-toolbar {
+  display: inline-flex;
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.graph-tab {
+  border: 0;
+  background: #f8f9fa;
+  color: var(--aws-text-secondary);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.graph-tab.active {
+  background: var(--aws-blue);
+  color: #fff;
+}
+
+.graph-swipe-wrap {
+  touch-action: pan-y;
+}
+
+.graph-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--aws-text-secondary);
 }
 
 /* ===== Tables ===== */
@@ -425,4 +462,18 @@ body {
 
 .summary-card {
   position: relative;
+}
+
+@media (max-width: 640px) {
+  .summary-card {
+    padding: 14px;
+  }
+
+  .summary-value {
+    font-size: 20px;
+  }
+
+  .summary-label {
+    font-size: 12px;
+  }
 }

@@ -1,10 +1,53 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Cell,
 } from 'recharts';
 
 const BASE = import.meta.env.BASE_URL;
+
+const GRAPH_VIEWS = ['distribution', 'hourly'];
+
+const buildHourKey = (date) => {
+  const d = new Date(date);
+  d.setMinutes(0, 0, 0);
+  return d.toISOString();
+};
+
+const buildHourlySeries = (hourlyKw) => {
+  const points = [];
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+
+  for (let i = 95; i >= 0; i -= 1) {
+    const slot = new Date(now);
+    slot.setHours(slot.getHours() - i);
+    const key = slot.toISOString();
+    const entry = hourlyKw[key];
+    const kw = entry ? entry.sum / Math.max(1, entry.count) : 0;
+    const hour = String(slot.getHours()).padStart(2, '0');
+    const label = slot.getHours() === 0
+      ? String(slot.getDate()).padStart(2, '0') + 'd'
+      : hour;
+    points.push({
+      name: hour,
+      label,
+      kw: Number(kw.toFixed(2)),
+      bucket: slot.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' }),
+    });
+  }
+
+  return points;
+};
+
+const sumChargePointWatts = (chargePoints) => chargePoints.reduce((sum, cp) => {
+  const mv = cp?.meter_values || {};
+  for (const key of Object.keys(mv)) {
+    if (key === '0') continue;
+    if (typeof mv[key]?.power === 'number') sum += mv[key].power;
+  }
+  return sum;
+}, 0);
 
 const STATUS_COLORS = {
   Available: '#0A7D4C', Preparing: '#FF9900', Charging: '#0073BB',
@@ -48,6 +91,10 @@ export default function App() {
   const [editOffPeakStart, setEditOffPeakStart] = useState(0);
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
   const [timezones, setTimezones] = useState([]);
+  const [graphView, setGraphView] = useState('distribution');
+  const [hourlyKw, setHourlyKw] = useState({});
+  const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 640);
+  const touchStartX = useRef(null);
 
   const fetchData = async () => {
     try {
@@ -57,6 +104,22 @@ export default function App() {
       if (!debugRes.ok) throw new Error('Server unavailable');
       const json = await debugRes.json();
       setData(json); setLastRefresh(new Date()); setError(null);
+      const watts = sumChargePointWatts(json?.charge_points || []);
+      const hourKey = buildHourKey(json?.timestamp || Date.now());
+      setHourlyKw((prev) => {
+        const next = { ...prev };
+        const current = next[hourKey] || { sum: 0, count: 0 };
+        next[hourKey] = {
+          sum: current.sum + (watts / 1000),
+          count: current.count + 1,
+        };
+        const keys = Object.keys(next).sort();
+        if (keys.length > 160) {
+          const toDrop = keys.slice(0, keys.length - 160);
+          toDrop.forEach((k) => delete next[k]);
+        }
+        return next;
+      });
       if (schedRes.ok) {
         try {
           const schedJson = await schedRes.json();
@@ -75,16 +138,25 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   const chargePoints = data?.charge_points || [];
   const connectedCps = chargePoints.filter(cp => cp.connected);
   const effectiveCpId = selectedCpId || (connectedCps[0]?.id) || (chargePoints[0]?.id) || null;
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
-  const totalPower = chargePoints.reduce((sum, cp) => {
-    const mv = cp.meter_values || {};
-    for (const key of Object.keys(mv)) { if (key === '0') continue; if (typeof mv[key]?.power === 'number') sum += mv[key].power; }
-    return sum;
-  }, 0);
+  const totalPower = sumChargePointWatts(chargePoints);
+  const hourlyChartData = useMemo(() => buildHourlySeries(hourlyKw), [hourlyKw]);
+
+  const shiftGraph = (step) => {
+    const idx = GRAPH_VIEWS.indexOf(graphView);
+    const nextIdx = (idx + step + GRAPH_VIEWS.length) % GRAPH_VIEWS.length;
+    setGraphView(GRAPH_VIEWS[nextIdx]);
+  };
 
   const setScheduleMode = async (cpId, mode) => {
     setSchedulePending(true); setScheduleMsg(null);
@@ -196,28 +268,84 @@ export default function App() {
             </div>
           </div>
 
-          {data.solar_metrics && (
-            <div className="card">
-              <div className="card-header">
-                <h3>Power Distribution</h3>
-                <span className="text-secondary" style={{fontSize: 12}}>{solar.last_update ? new Date(solar.last_update).toLocaleTimeString() : 'No data'}</span>
-              </div>
-              <div className="card-body">
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={[{ name: 'PV', value: Math.abs(solar.pv_power || 0) }, { name: 'Grid Out', value: Math.abs(solar.grid_export || 0) }, { name: 'Grid In', value: Math.abs(solar.grid_import || 0) }, { name: 'Charging', value: Math.round(totalPower) }]}
-                    margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#95a5a6' }} />
-                    <YAxis tick={{ fontSize: 12, fill: '#95a5a6' }} />
-                    <Tooltip formatter={(v) => v + 'W'} />
-                    <Bar dataKey="value" radius={[2, 2, 0, 0]}>
-                      <Cell fill="#FF9900" /><Cell fill="#0A7D4C" /><Cell fill="#D13212" /><Cell fill="#0073BB" />
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+          <div className="card">
+            <div className="card-header">
+              <h3>Power Graphs</h3>
+              <span className="text-secondary" style={{fontSize: 12}}>
+                {graphView === 'distribution'
+                  ? (solar.last_update ? new Date(solar.last_update).toLocaleTimeString() : 'No data')
+                  : 'Last 96 hours'}
+              </span>
             </div>
-          )}
+            <div className="card-body">
+              <div className="graph-toolbar" role="tablist" aria-label="Graph selector">
+                <button
+                  className={'graph-tab' + (graphView === 'distribution' ? ' active' : '')}
+                  onClick={() => setGraphView('distribution')}
+                >
+                  Live Split
+                </button>
+                <button
+                  className={'graph-tab' + (graphView === 'hourly' ? ' active' : '')}
+                  onClick={() => setGraphView('hourly')}
+                >
+                  96h Usage
+                </button>
+              </div>
+
+              <div
+                className="graph-swipe-wrap"
+                onTouchStart={(e) => {
+                  touchStartX.current = e.changedTouches?.[0]?.clientX ?? null;
+                }}
+                onTouchEnd={(e) => {
+                  if (!isNarrow || touchStartX.current == null) return;
+                  const endX = e.changedTouches?.[0]?.clientX;
+                  if (typeof endX !== 'number') return;
+                  const delta = endX - touchStartX.current;
+                  if (Math.abs(delta) < 40) return;
+                  shiftGraph(delta > 0 ? -1 : 1);
+                  touchStartX.current = null;
+                }}
+              >
+                {graphView === 'distribution' ? (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart
+                      data={[
+                        { name: 'PV', value: Math.abs(solar.pv_power || 0) },
+                        { name: 'Grid Out', value: Math.abs(solar.grid_export || 0) },
+                        { name: 'Grid In', value: Math.abs(solar.grid_import || 0) },
+                        { name: 'Charging', value: Math.round(totalPower) },
+                      ]}
+                      margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
+                      <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#95a5a6' }} />
+                      <YAxis tick={{ fontSize: 12, fill: '#95a5a6' }} />
+                      <Tooltip formatter={(v) => v + 'W'} />
+                      <Bar dataKey="value" radius={[2, 2, 0, 0]}>
+                        <Cell fill="#FF9900" /><Cell fill="#0A7D4C" /><Cell fill="#D13212" /><Cell fill="#0073BB" />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={hourlyChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#95a5a6' }} interval={7} />
+                      <YAxis tick={{ fontSize: 12, fill: '#95a5a6' }} unit="kW" />
+                      <Tooltip
+                        formatter={(v) => Number(v).toFixed(2) + ' kW'}
+                        labelFormatter={(_, payload) => payload?.[0]?.payload?.bucket || 'Hour'}
+                      />
+                      <Bar dataKey="kw" fill="#0073BB" radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+              {isNarrow && <div className="graph-hint">Swipe left or right on the chart to switch graphs.</div>}
+            </div>
+          </div>
 
           {selectedCp && (
             <div className="card">
