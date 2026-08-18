@@ -145,6 +145,7 @@ HISTORY_WINDOW_HOURS = _env_int("HISTORY_WINDOW_HOURS", 96)
 HISTORY_RETENTION_HOURS = _env_int("HISTORY_RETENTION_HOURS", 192)
 HISTORY_SAMPLE_SECONDS = _env_int("HISTORY_SAMPLE_SECONDS", 60)
 _hourly_history: dict[str, dict] = {}
+SCHEDULE_OCPP_TIMEOUT_SECONDS = float(_env_str("SCHEDULE_OCPP_TIMEOUT_SECONDS", "8"))
 
 # Daily usage/cost graph settings
 DAILY_WINDOW_DAYS = _env_int("DAILY_WINDOW_DAYS", 60)
@@ -1225,6 +1226,7 @@ async def handle_schedule_post(request):
         body = await request.json()
         cp_id = body.get("cp_id")
         mode = body.get("mode")
+        call_warnings = []
 
         if not cp_id or mode not in ("stop", "auto", "charge_now"):
             return web.json_response({"error": "Missing cp_id or invalid mode (use stop|auto|charge_now)"}, status=400)
@@ -1278,19 +1280,30 @@ async def handle_schedule_post(request):
         from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
         from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
 
+        async def safe_cp_call(label: str, call_obj):
+            """Run OCPP call with timeout so HTTP schedule endpoint cannot hang."""
+            try:
+                return await asyncio.wait_for(cp.call(call_obj), timeout=SCHEDULE_OCPP_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                msg = f"{label} timed out after {SCHEDULE_OCPP_TIMEOUT_SECONDS:.0f}s"
+                _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
+                call_warnings.append(msg)
+            except Exception as e:
+                msg = f"{label} failed: {e}"
+                _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
+                call_warnings.append(msg)
+            return None
+
         if mode == "stop":
             _LOGGER.info("STOP mode for %s — clearing profile + stopping any active charge", cp_id)
-            await cp.call(ClearChargingProfile(
+            await safe_cp_call("ClearChargingProfile", ClearChargingProfile(
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
             tx_id = _tx_ids.get(cp_id, 0)
             if tx_id:
-                try:
-                    await cp.call(RemoteStopTransaction(transaction_id=tx_id))
-                except Exception as e:
-                    _LOGGER.warning("RemoteStopTransaction failed: %s", e)
-            await cp.call(SetChargingProfile(
+                await safe_cp_call("RemoteStopTransaction", RemoteStopTransaction(transaction_id=tx_id))
+            await safe_cp_call("SetChargingProfile(stop)", SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
@@ -1317,7 +1330,7 @@ async def handle_schedule_post(request):
                 ))
             desc = ", ".join(f"{p['start_hour']:02d}:00→{p['limit_watts']:.0f}W" for p in periods)
             _LOGGER.info("AUTO mode for %s — periods (Recurring+Daily): %s", cp_id, desc)
-            await cp.call(SetChargingProfile(
+            await safe_cp_call("SetChargingProfile(auto)", SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=1, stack_level=0,
@@ -1334,11 +1347,11 @@ async def handle_schedule_post(request):
 
         else:  # charge_now
             _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)
-            await cp.call(ClearChargingProfile(
+            await safe_cp_call("ClearChargingProfile", ClearChargingProfile(
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
-            await cp.call(SetChargingProfile(
+            await safe_cp_call("SetChargingProfile(charge_now)", SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
                     charging_profile_id=0, stack_level=0,
@@ -1354,19 +1367,19 @@ async def handle_schedule_post(request):
             ))
             conn1_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1", "")
             if conn1_status in ("Available", "Preparing"):
-                try:
-                    await cp.call(RemoteStartTransaction(
-                        id_tag="0000003934", connector_id=1,
-                    ))
-                except Exception as e:
-                    _LOGGER.warning("RemoteStartTransaction failed: %s", e)
+                await safe_cp_call("RemoteStartTransaction", RemoteStartTransaction(
+                    id_tag="0000003934", connector_id=1,
+                ))
             _record_event(cp_id, "schedule", "Mode: CHARGE NOW")
 
         # Persist to DocumentDB
         asyncio.create_task(_docdb_save_schedule(cp_id))
 
         await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode})
-        return web.json_response({"status": "ok", "mode": mode, "config": config})
+        response = {"status": "ok", "mode": mode, "config": config}
+        if call_warnings:
+            response["warnings"] = call_warnings
+        return web.json_response(response)
 
     except Exception as e:
         _LOGGER.error("Schedule error: %s", e)

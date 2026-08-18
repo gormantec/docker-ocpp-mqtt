@@ -165,23 +165,39 @@ export default function App() {
     setGraphView(GRAPH_VIEWS[nextIdx]);
   };
 
+  const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const setScheduleMode = async (cpId, mode) => {
     setSchedulePending(true); setScheduleMsg(null);
     try {
-      const res = await fetch(BASE + 'schedule', {
+      const res = await fetchWithTimeout(BASE + 'schedule', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cp_id: cpId, mode }),
-      });
+      }, 12000);
       const result = await res.json();
       if (res.ok) {
         const msgs = { auto: 'AUTO (peak/off-peak schedule)', stop: 'STOP - all charging blocked', charge_now: 'CHARGE NOW - full power' };
-        setScheduleMsg({ type: 'success', text: cpId + ': ' + (msgs[mode] || mode) });
+        const warn = (result.warnings && result.warnings.length > 0) ? ' (' + result.warnings[0] + ')' : '';
+        setScheduleMsg({ type: 'success', text: cpId + ': ' + (msgs[mode] || mode) + warn });
         try {
           const schedRes = await fetch(BASE + 'schedule');
           if (schedRes.ok) { const schedJson = await schedRes.json(); setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {}); }
         } catch {}
       } else { setScheduleMsg({ type: 'error', text: result.error || 'Request failed' }); }
-    } catch (e) { setScheduleMsg({ type: 'error', text: 'Connection issue - try again' }); }
+    } catch (e) {
+      setScheduleMsg({
+        type: 'error',
+        text: e?.name === 'AbortError' ? 'Schedule request timed out - charger did not respond' : 'Connection issue - try again',
+      });
+    }
     finally { setSchedulePending(false); }
   };
 
