@@ -22,7 +22,7 @@ import asyncio
 import json
 import time
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, available_timezones
 from collections import deque
 
@@ -140,6 +140,12 @@ STARTED_AT = datetime.now(timezone.utc)
 MAX_EVENTS = 200
 _event_buffer: deque = deque(maxlen=MAX_EVENTS)
 
+# Backend-maintained charging history for 96h UI backfill
+HISTORY_WINDOW_HOURS = _env_int("HISTORY_WINDOW_HOURS", 96)
+HISTORY_RETENTION_HOURS = _env_int("HISTORY_RETENTION_HOURS", 192)
+HISTORY_SAMPLE_SECONDS = _env_int("HISTORY_SAMPLE_SECONDS", 60)
+_hourly_history: dict[str, dict] = {}
+
 # Per-charge-point state
 _cp_state: dict[str, dict] = {}
 
@@ -176,6 +182,68 @@ def _record_event(cp_id: str, event_type: str, summary: str = ""):
                             "connectors": {},  # per-connector -> status
                             "meter_values": {}}  # per-connector -> {power, energy, timestamp}
     _cp_state[cp_id]["last_event"] = event["time"]
+
+
+def _hour_bucket_key(ts: datetime) -> str:
+    slot = ts.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return slot.isoformat()
+
+
+def _current_total_power_watts() -> float:
+    total = 0.0
+    for cp in _cp_state.values():
+        mv = cp.get("meter_values", {})
+        for conn_id, conn_mv in mv.items():
+            if conn_id == "0":
+                continue
+            power = conn_mv.get("power")
+            if isinstance(power, (int, float)):
+                total += max(0.0, float(power))
+    return total
+
+
+def _record_hourly_sample(ts: datetime | None = None):
+    """Record one backend sample of aggregate charger power into an hourly bucket."""
+    global _hourly_history
+    now = ts or datetime.now(timezone.utc)
+    bucket_key = _hour_bucket_key(now)
+    bucket = _hourly_history.get(bucket_key, {"sum_kw": 0.0, "samples": 0})
+    bucket["sum_kw"] += _current_total_power_watts() / 1000.0
+    bucket["samples"] += 1
+    _hourly_history[bucket_key] = bucket
+
+    cutoff = now - timedelta(hours=HISTORY_RETENTION_HOURS)
+    for key in list(_hourly_history.keys()):
+        try:
+            if datetime.fromisoformat(key) < cutoff:
+                del _hourly_history[key]
+        except Exception:
+            del _hourly_history[key]
+
+
+def _hourly_history_for_debug(now: datetime) -> dict:
+    samples = []
+    base = now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    for offset in range(HISTORY_WINDOW_HOURS - 1, -1, -1):
+        slot = base - timedelta(hours=offset)
+        key = slot.isoformat()
+        bucket = _hourly_history.get(key)
+        kw = (bucket["sum_kw"] / bucket["samples"]) if bucket and bucket.get("samples") else 0.0
+        samples.append({"hour": key, "kw": round(kw, 3)})
+    return {
+        "window_hours": HISTORY_WINDOW_HOURS,
+        "samples": samples,
+    }
+
+
+async def _hourly_history_loop():
+    """Background sampler so history exists even before a UI client opens /debug."""
+    while True:
+        try:
+            _record_hourly_sample(datetime.now(timezone.utc))
+        except Exception as e:
+            _LOGGER.error("Hourly history sample error: %s", e)
+        await asyncio.sleep(HISTORY_SAMPLE_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +741,7 @@ async def handle_debug(request):
             "last_update": _solar_metrics["last_update"].isoformat() if _solar_metrics["last_update"] else None,
         },
         "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
+        "hourly_history": _hourly_history_for_debug(now),
     })
 
 
@@ -1343,6 +1412,7 @@ async def main():
 
     # Start Solar Smart background loop
     asyncio.create_task(_solar_smart_loop())
+    asyncio.create_task(_hourly_history_loop())
 
     app = web.Application()
 

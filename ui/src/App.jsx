@@ -8,13 +8,15 @@ const BASE = import.meta.env.BASE_URL;
 
 const GRAPH_VIEWS = ['distribution', 'hourly'];
 
-const buildHourKey = (date) => {
-  const d = new Date(date);
-  d.setMinutes(0, 0, 0);
-  return d.toISOString();
-};
+const buildHourlySeries = (samples) => {
+  const sampleMap = new Map();
+  (samples || []).forEach((entry) => {
+    if (!entry?.hour) return;
+    const d = new Date(entry.hour);
+    d.setMinutes(0, 0, 0);
+    sampleMap.set(d.toISOString(), Number(entry.kw || 0));
+  });
 
-const buildHourlySeries = (hourlyKw) => {
   const points = [];
   const now = new Date();
   now.setMinutes(0, 0, 0);
@@ -23,8 +25,7 @@ const buildHourlySeries = (hourlyKw) => {
     const slot = new Date(now);
     slot.setHours(slot.getHours() - i);
     const key = slot.toISOString();
-    const entry = hourlyKw[key];
-    const kw = entry ? entry.sum / Math.max(1, entry.count) : 0;
+    const kw = sampleMap.get(key) || 0;
     const hour = String(slot.getHours()).padStart(2, '0');
     const label = slot.getHours() === 0
       ? String(slot.getDate()).padStart(2, '0') + 'd'
@@ -92,7 +93,6 @@ export default function App() {
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
-  const [hourlyKw, setHourlyKw] = useState({});
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 640);
   const touchStartX = useRef(null);
 
@@ -104,22 +104,6 @@ export default function App() {
       if (!debugRes.ok) throw new Error('Server unavailable');
       const json = await debugRes.json();
       setData(json); setLastRefresh(new Date()); setError(null);
-      const watts = sumChargePointWatts(json?.charge_points || []);
-      const hourKey = buildHourKey(json?.timestamp || Date.now());
-      setHourlyKw((prev) => {
-        const next = { ...prev };
-        const current = next[hourKey] || { sum: 0, count: 0 };
-        next[hourKey] = {
-          sum: current.sum + (watts / 1000),
-          count: current.count + 1,
-        };
-        const keys = Object.keys(next).sort();
-        if (keys.length > 160) {
-          const toDrop = keys.slice(0, keys.length - 160);
-          toDrop.forEach((k) => delete next[k]);
-        }
-        return next;
-      });
       if (schedRes.ok) {
         try {
           const schedJson = await schedRes.json();
@@ -150,7 +134,10 @@ export default function App() {
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
   const totalPower = sumChargePointWatts(chargePoints);
-  const hourlyChartData = useMemo(() => buildHourlySeries(hourlyKw), [hourlyKw]);
+  const hourlyChartData = useMemo(
+    () => buildHourlySeries(data?.hourly_history?.samples || []),
+    [data?.hourly_history?.samples],
+  );
 
   const shiftGraph = (step) => {
     const idx = GRAPH_VIEWS.indexOf(graphView);
