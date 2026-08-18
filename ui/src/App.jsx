@@ -253,7 +253,7 @@ export default function App() {
                 <h3>⏱ Schedule Control</h3>
                 {chargePoints.length > 0 && (
                   <select value={effectiveCpId || ''} onChange={(e) => setSelectedCpId(e.target.value || null)}
-                    style={{ padding: '4px 8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3, fontSize: 13, maxWidth: 200 }}>
+                    style={{ padding: '4px 8px', background: '#fff', border: '1px solid #D5DBDB', color: '#16191F', borderRadius: 3, fontSize: 13, maxWidth: 200 }}>
                     {chargePoints.map(cp => (<option key={cp.id} value={cp.id}>{cp.id}{cp.connected ? '' : ' (offline)'}</option>))}
                   </select>
                 )}
@@ -468,34 +468,34 @@ export default function App() {
 
           {/* Period Config Modal */}
           {showConfig && (
-          <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+          <div className="modal-overlay ocpp-modal-overlay"
             onClick={(e) => { if (e.target === e.currentTarget) setShowConfig(false); }}>
-            <div className="modal-content card" style={{ width: 520, maxHeight: '80vh', overflow: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.4)' }}>
+            <div className="modal-content card ocpp-modal-content">
               <div className="card-header"><h3>⚙ Configure Schedule - {effectiveCpId}</h3><button className="btn btn-secondary" style={{padding: '4px 10px'}} onClick={() => setShowConfig(false)}>✕</button></div>
               <div className="card-body">
                 <div style={{marginBottom: 16}}>
-                  <label style={{fontSize: 12, color: '#95a5a6', display: 'block', marginBottom: 4}}>Timezone</label>
+                  <label className="ocpp-field-label">Timezone</label>
                   <select value={editTimezone} onChange={(e) => setEditTimezone(e.target.value)}
-                    style={{width: '100%', padding: '8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3}}>
+                    className="ocpp-input">
                     {(timezones.length > 0 ? timezones : ['Australia/Sydney', 'UTC']).map(tz => (<option key={tz} value={tz}>{tz}</option>))}
                   </select>
                 </div>
-                <div style={{marginBottom: 16, padding: '12px', background: '#1a2332', borderRadius: 4, border: '1px solid #3a4552'}}>
+                <div className="ocpp-modal-panel">
                   <label style={{display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginBottom: 12}}>
                     <input type="checkbox" checked={editSolarSmart} onChange={(e) => setEditSolarSmart(e.target.checked)} style={{width: 18, height: 18, cursor: 'pointer'}} />
                     <span style={{fontWeight: 600, fontSize: 14}}>☀️ Solar Smart</span>
                   </label>
-                  <p style={{fontSize: 12, color: '#95a5a6', marginBottom: 10}}>Dynamically throttle charging based on solar/grid balance.</p>
+                  <p className="ocpp-help-text" style={{marginBottom: 10}}>Dynamically throttle charging based on solar/grid balance.</p>
                   {editSolarSmart && (<div style={{display: 'flex', gap: 16}}>
-                    <div style={{flex: 1}}><label style={{fontSize: 11, color: '#95a5a6', display: 'block', marginBottom: 3}}>Off-Peak Start</label><input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value) || 0)} style={{width: '100%', padding: '6px 8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3}} /></div>
-                    <div style={{flex: 1}}><label style={{fontSize: 11, color: '#95a5a6', display: 'block', marginBottom: 3}}>Off-Peak End</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value) || 0)} style={{width: '100%', padding: '6px 8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3}} /></div>
+                    <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak Start</label><input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value) || 0)} className="ocpp-input ocpp-input-sm" /></div>
+                    <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak End</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value) || 0)} className="ocpp-input ocpp-input-sm" /></div>
                   </div>)}
                 </div>
-                <p className="hint" style={{marginBottom: 16, fontSize: 13, color: '#95a5a6'}}>Each period sets a power limit starting at a given hour. Schedule repeats <strong>daily</strong>.</p>
+                <p className="hint ocpp-help-text" style={{marginBottom: 16, fontSize: 13}}>Each period sets a power limit starting at a given hour. Schedule repeats <strong>daily</strong>.</p>
                 {editPeriods.map((p, i) => (
-                  <div key={i} style={{marginBottom: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 12, backgroundColor: '#1a2332', borderRadius: 4}}>
-                    <div style={{flex: 1}}><label style={{fontSize: 11, color: '#95a5a6', display: 'block'}}>Start Hour</label><input type="number" min={0} max={23} value={p.start_hour} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], start_hour: parseInt(e.target.value) || 0}; setEditPeriods(next); }} style={{width: '100%', padding: '6px 8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3}} /></div>
-                    <div style={{flex: 2}}><label style={{fontSize: 11, color: '#95a5a6', display: 'block'}}>Limit (Watts)</label><input type="number" min={0} max={50000} step={100} value={p.limit_watts} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], limit_watts: parseInt(e.target.value) || 0}; setEditPeriods(next); }} style={{width: '100%', padding: '6px 8px', background: '#0d141e', border: '1px solid #3a4552', color: '#d5dbdb', borderRadius: 3}} /></div>
+                  <div key={i} className="ocpp-period-row">
+                    <div style={{flex: 1}}><label className="ocpp-small-label">Start Hour</label><input type="number" min={0} max={23} value={p.start_hour} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], start_hour: parseInt(e.target.value) || 0}; setEditPeriods(next); }} className="ocpp-input ocpp-input-sm" /></div>
+                    <div style={{flex: 2}}><label className="ocpp-small-label">Limit (Watts)</label><input type="number" min={0} max={50000} step={100} value={p.limit_watts} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], limit_watts: parseInt(e.target.value) || 0}; setEditPeriods(next); }} className="ocpp-input ocpp-input-sm" /></div>
                     <button className="btn btn-secondary" style={{padding: '4px 8px', fontSize: 12}} disabled={editPeriods.length <= 1} onClick={() => { if (editPeriods.length > 1) setEditPeriods(editPeriods.filter((_, idx) => idx !== i)); }}>✕</button>
                   </div>
                 ))}

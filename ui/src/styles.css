@@ -477,3 +477,75 @@ body {
     font-size: 12px;
   }
 }
+
+/* ===== OCPP Settings Modal ===== */
+.ocpp-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(35, 47, 62, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.ocpp-modal-content {
+  width: 520px;
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: 0 8px 24px rgba(22, 25, 31, 0.18);
+}
+
+.ocpp-field-label {
+  font-size: 12px;
+  color: #545B64;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.ocpp-small-label {
+  font-size: 11px;
+  color: #545B64;
+  display: block;
+  margin-bottom: 3px;
+}
+
+.ocpp-input {
+  width: 100%;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #D5DBDB;
+  color: #16191F;
+  border-radius: 3px;
+}
+
+.ocpp-input-sm {
+  padding: 6px 8px;
+}
+
+.ocpp-modal-panel {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #F8F9FA;
+  border-radius: 4px;
+  border: 1px solid #D5DBDB;
+}
+
+.ocpp-period-row {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background-color: #F8F9FA;
+  border-radius: 4px;
+  border: 1px solid #D5DBDB;
+}
+
+.ocpp-help-text {
+  font-size: 12px;
+  color: #545B64;
+}
