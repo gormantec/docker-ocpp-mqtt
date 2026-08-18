@@ -272,7 +272,7 @@ def _import_rate_for_time(ts: datetime) -> float:
     return GENERAL_RATE + demand
 
 
-def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_w: float):
+def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_w: float, load_w: float = 0.0):
     """Integrate ESY grid telemetry over time into per-day usage/cost buckets."""
     global _last_esy_sample_at
     if _last_esy_sample_at is None:
@@ -288,18 +288,21 @@ def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_
 
     import_kwh = max(0.0, float(grid_import_w)) * dt_hours / 1000.0
     export_kwh = max(0.0, float(grid_export_w)) * dt_hours / 1000.0
+    load_kwh = max(0.0, float(load_w)) * dt_hours / 1000.0
     cost_delta = (import_kwh * _import_rate_for_time(ts)) - (export_kwh * FEED_IN_TARIFF)
 
     day_key = _daily_key(ts)
     bucket = _daily_energy_history.get(day_key, {
         "import_kwh": 0.0,
         "export_kwh": 0.0,
+        "load_kwh": 0.0,
         "net_kwh": 0.0,
         "cost": 0.0,
         "samples": 0,
     })
     bucket["import_kwh"] += import_kwh
     bucket["export_kwh"] += export_kwh
+    bucket["load_kwh"] += load_kwh
     bucket["net_kwh"] += (import_kwh - export_kwh)
     bucket["cost"] += cost_delta
     bucket["samples"] += 1
@@ -316,7 +319,7 @@ def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_
 
 def _daily_usage_60d_for_debug(now: datetime) -> dict:
     days = []
-    window_import = 0.0
+    window_load = 0.0
     window_cost = 0.0
 
     local_now = now.astimezone(ENERGY_TZ)
@@ -326,21 +329,23 @@ def _daily_usage_60d_for_debug(now: datetime) -> dict:
         bucket = _daily_energy_history.get(key, {})
         import_kwh = float(bucket.get("import_kwh", 0.0))
         export_kwh = float(bucket.get("export_kwh", 0.0))
+        load_kwh = float(bucket.get("load_kwh", import_kwh))
         net_kwh = float(bucket.get("net_kwh", import_kwh - export_kwh))
         cost = float(bucket.get("cost", 0.0))
-        day_price = (cost / import_kwh) if import_kwh > 0 else 0.0
-        window_import += import_kwh
+        day_price = (cost / load_kwh) if load_kwh > 0 else 0.0
+        window_load += load_kwh
         window_cost += cost
         days.append({
             "date": key,
             "usage_kwh": round(import_kwh, 3),
+            "load_kwh": round(load_kwh, 3),
             "export_kwh": round(export_kwh, 3),
             "net_kwh": round(net_kwh, 3),
             "cost": round(cost, 4),
             "avg_price_per_kw": round(day_price, 5),
         })
 
-    window_avg = (window_cost / window_import) if window_import > 0 else 0.0
+    window_avg = (window_cost / window_load) if window_load > 0 else 0.0
     for row in days:
         row["avg_price_60d_per_kw"] = round(window_avg, 5)
 
@@ -792,6 +797,8 @@ async def mqtt_listener():
                         _solar_metrics["grid_export"] = int(float(data["gridExport"]))
                     if "batterySoc" in data:
                         _solar_metrics["battery_soc"] = int(float(data["batterySoc"]))
+                    if "loadPower" in data:
+                        _solar_metrics["load_power"] = int(float(data["loadPower"]))
                     if "pvPower" in data:
                         _solar_metrics["pv_power"] = int(float(data["pvPower"]))
                     _solar_metrics["last_update"] = datetime.now(timezone.utc)
@@ -799,6 +806,7 @@ async def mqtt_listener():
                         _solar_metrics["last_update"],
                         _solar_metrics["grid_import"],
                         _solar_metrics["grid_export"],
+                        _solar_metrics["load_power"],
                     )
                 except Exception:
                     pass
@@ -846,6 +854,7 @@ async def handle_debug(request):
         "solar_metrics": {
             "grid_import": _solar_metrics["grid_import"],
             "grid_export": _solar_metrics["grid_export"],
+            "load_power": _solar_metrics["load_power"],
             "battery_soc": _solar_metrics["battery_soc"],
             "pv_power": _solar_metrics["pv_power"],
             "last_update": _solar_metrics["last_update"].isoformat() if _solar_metrics["last_update"] else None,
@@ -880,6 +889,7 @@ _tx_ids: dict[str, int] = {}
 _solar_metrics = {
     "grid_import": 0,     # Watts importing from grid
     "grid_export": 0,     # Watts exporting to grid
+    "load_power": 0,      # Watts consumed by load (any source)
     "battery_soc": None,  # Battery % (None = unknown)
     "pv_power": 0,        # Solar generation Watts
     "last_update": None,  # datetime of last ESY telemetry
