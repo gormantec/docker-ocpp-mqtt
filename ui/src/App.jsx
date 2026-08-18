@@ -49,6 +49,7 @@ const buildDailyUsageSeries = (daily) => {
       label: String(date.getDate()).padStart(2, '0') + '/' + String(date.getMonth() + 1).padStart(2, '0'),
       day: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
       usage_kwh: Number(entry.usage_kwh || 0),
+      load_kwh: Number(entry.load_kwh || 0),
       export_kwh: Number(entry.export_kwh || 0),
       net_kwh: Number(entry.net_kwh || 0),
       cost: Number(entry.cost || 0),
@@ -446,16 +447,16 @@ export default function App() {
                         minTickGap={isNarrow ? 18 : 8}
                       />
                       <YAxis yAxisId="usage" tick={{ fontSize: 12, fill: '#95a5a6' }} unit="kWh" />
-                      <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#8d99a6' }} tickFormatter={(v) => '$' + Number(v).toFixed(2)} />
+                        <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#D13212' }} tickFormatter={(v) => '$' + Number(v).toFixed(2)} />
                       <Tooltip
                         labelFormatter={(_, payload) => payload?.[0]?.payload?.day || 'Day'}
                         formatter={(value, name) => {
-                          if (name === 'Usage') return [Number(value).toFixed(2) + ' kWh', 'Usage'];
-                          return ['$' + Number(value).toFixed(4) + '/kWh', '60d Avg Price'];
+                            if (name === 'Grid Usage') return [Number(value).toFixed(2) + ' kWh', 'Grid Usage'];
+                            return ['$' + Number(value).toFixed(4) + '/kWh', '60d Avg Price (Grid Spend / Load)'];
                         }}
                       />
-                      <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Usage" stroke="#0073BB" strokeWidth={2} dot={false} />
-                      <Line yAxisId="price" type="linear" dataKey="avg_price_per_kw" name="60d Avg Price" stroke="#8d99a6" strokeDasharray="6 6" strokeWidth={2} dot={false} />
+                        <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Grid Usage" stroke="#0073BB" strokeWidth={2} dot={false} />
+                        <Line yAxisId="price" type="linear" dataKey="avg_price_per_kw" name="60d Avg Price (Grid Spend / Load)" stroke="#D13212" strokeDasharray="6 6" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
