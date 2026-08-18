@@ -1308,23 +1308,25 @@ async def handle_schedule_post(request):
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
-            tx_id = _tx_ids.get(cp_id, 0)
-            if tx_id:
-                await safe_cp_call("RemoteStopTransaction", RemoteStopTransaction(transaction_id=tx_id))
-            await safe_cp_call("SetChargingProfile(stop)", SetChargingProfile(
-                connector_id=0,
-                cs_charging_profiles=ChargingProfile(
-                    charging_profile_id=1, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=0.0),
-                        ],
+            if not call_warnings:
+                tx_id = _tx_ids.get(cp_id, 0)
+                if tx_id:
+                    await safe_cp_call("RemoteStopTransaction", RemoteStopTransaction(transaction_id=tx_id))
+            if not call_warnings:
+                await safe_cp_call("SetChargingProfile(stop)", SetChargingProfile(
+                    connector_id=0,
+                    cs_charging_profiles=ChargingProfile(
+                        charging_profile_id=1, stack_level=0,
+                        charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                        charging_profile_kind=ChargingProfileKindType.relative,
+                        charging_schedule=ChargingSchedule(
+                            charging_rate_unit=ChargingRateUnitType.watts,
+                            charging_schedule_period=[
+                                ChargingSchedulePeriod(start_period=0, limit=0.0),
+                            ],
+                        ),
                     ),
-                ),
-            ))
+                ))
             _record_event(cp_id, "schedule", "Mode: STOP — charging blocked")
 
         elif mode == "auto":
@@ -1359,22 +1361,23 @@ async def handle_schedule_post(request):
                 id=1, connector_id=0,
                 charging_profile_purpose="TxDefaultProfile", stack_level=0,
             ))
-            await safe_cp_call("SetChargingProfile(charge_now)", SetChargingProfile(
-                connector_id=0,
-                cs_charging_profiles=ChargingProfile(
-                    charging_profile_id=0, stack_level=0,
-                    charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
-                    charging_profile_kind=ChargingProfileKindType.relative,
-                    charging_schedule=ChargingSchedule(
-                        charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=[
-                            ChargingSchedulePeriod(start_period=0, limit=4800.0),
-                        ],
+            if not call_warnings:
+                await safe_cp_call("SetChargingProfile(charge_now)", SetChargingProfile(
+                    connector_id=0,
+                    cs_charging_profiles=ChargingProfile(
+                        charging_profile_id=0, stack_level=0,
+                        charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+                        charging_profile_kind=ChargingProfileKindType.relative,
+                        charging_schedule=ChargingSchedule(
+                            charging_rate_unit=ChargingRateUnitType.watts,
+                            charging_schedule_period=[
+                                ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                            ],
+                        ),
                     ),
-                ),
-            ))
+                ))
             conn1_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1", "")
-            if conn1_status in ("Available", "Preparing"):
+            if (not call_warnings) and conn1_status in ("Available", "Preparing"):
                 await safe_cp_call("RemoteStartTransaction", RemoteStartTransaction(
                     id_tag="0000003934", connector_id=1,
                 ))
