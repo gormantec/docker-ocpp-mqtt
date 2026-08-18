@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Cell,
+  ResponsiveContainer, Cell, LineChart, Line,
 } from 'recharts';
 
 const BASE = import.meta.env.BASE_URL;
 
-const GRAPH_VIEWS = ['distribution', 'hourly'];
+const GRAPH_VIEWS = ['distribution', 'hourly', 'daily60'];
 
 const buildHourlySeries = (samples) => {
   const sampleMap = new Map();
@@ -39,6 +39,22 @@ const buildHourlySeries = (samples) => {
   }
 
   return points;
+};
+
+const buildDailyUsageSeries = (daily) => {
+  const avgPrice = Number(daily?.avg_price_per_kw || 0);
+  return (daily?.days || []).map((entry) => {
+    const date = new Date(entry.date + 'T00:00:00');
+    return {
+      label: String(date.getDate()).padStart(2, '0') + '/' + String(date.getMonth() + 1).padStart(2, '0'),
+      day: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+      usage_kwh: Number(entry.usage_kwh || 0),
+      export_kwh: Number(entry.export_kwh || 0),
+      net_kwh: Number(entry.net_kwh || 0),
+      cost: Number(entry.cost || 0),
+      avg_price_per_kw: Number(entry.avg_price_60d_per_kw ?? avgPrice),
+    };
+  });
 };
 
 const sumChargePointWatts = (chargePoints) => chargePoints.reduce((sum, cp) => {
@@ -137,6 +153,10 @@ export default function App() {
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
     [data?.hourly_history?.samples],
+  );
+  const dailyChartData = useMemo(
+    () => buildDailyUsageSeries(data?.daily_usage_60d),
+    [data?.daily_usage_60d],
   );
 
   const shiftGraph = (step) => {
@@ -261,7 +281,7 @@ export default function App() {
               <span className="text-secondary" style={{fontSize: 12}}>
                 {graphView === 'distribution'
                   ? (solar.last_update ? new Date(solar.last_update).toLocaleTimeString() : 'No data')
-                  : 'Last 96 hours'}
+                  : graphView === 'hourly' ? 'Last 96 hours' : 'Last 60 days'}
               </span>
             </div>
             <div className="card-body">
@@ -277,6 +297,12 @@ export default function App() {
                   onClick={() => setGraphView('hourly')}
                 >
                   96h Usage
+                </button>
+                <button
+                  className={'graph-tab' + (graphView === 'daily60' ? ' active' : '')}
+                  onClick={() => setGraphView('daily60')}
+                >
+                  60d Cost
                 </button>
               </div>
 
@@ -315,7 +341,7 @@ export default function App() {
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
-                ) : (
+                ) : graphView === 'hourly' ? (
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={hourlyChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
@@ -327,6 +353,24 @@ export default function App() {
                       />
                       <Bar dataKey="kw" fill="#0073BB" radius={[2, 2, 0, 0]} />
                     </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <ResponsiveContainer width="100%" height={240}>
+                    <LineChart data={dailyChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#95a5a6' }} interval={4} />
+                      <YAxis yAxisId="usage" tick={{ fontSize: 12, fill: '#95a5a6' }} unit="kWh" />
+                      <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#8d99a6' }} tickFormatter={(v) => '$' + Number(v).toFixed(2)} />
+                      <Tooltip
+                        labelFormatter={(_, payload) => payload?.[0]?.payload?.day || 'Day'}
+                        formatter={(value, name) => {
+                          if (name === 'Usage') return [Number(value).toFixed(2) + ' kWh', 'Usage'];
+                          return ['$' + Number(value).toFixed(4) + '/kWh', '60d Avg Price'];
+                        }}
+                      />
+                      <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Usage" stroke="#0073BB" strokeWidth={2} dot={false} />
+                      <Line yAxisId="price" type="linear" dataKey="avg_price_per_kw" name="60d Avg Price" stroke="#8d99a6" strokeDasharray="6 6" strokeWidth={2} dot={false} />
+                    </LineChart>
                   </ResponsiveContainer>
                 )}
               </div>

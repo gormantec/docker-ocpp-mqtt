@@ -146,6 +146,19 @@ HISTORY_RETENTION_HOURS = _env_int("HISTORY_RETENTION_HOURS", 192)
 HISTORY_SAMPLE_SECONDS = _env_int("HISTORY_SAMPLE_SECONDS", 60)
 _hourly_history: dict[str, dict] = {}
 
+# Daily usage/cost graph settings
+DAILY_WINDOW_DAYS = _env_int("DAILY_WINDOW_DAYS", 60)
+DAILY_RETENTION_DAYS = _env_int("DAILY_RETENTION_DAYS", 120)
+OFFPEAK_RATE = float(_env_str("OFFPEAK_RATE", "0.08"))
+GENERAL_RATE = float(_env_str("GENERAL_RATE", "0.26763"))
+SUMMER_DEMAND_RATE = float(_env_str("SUMMER_DEMAND_RATE", "0.19998"))
+NON_SUMMER_DEMAND_RATE = float(_env_str("NON_SUMMER_DEMAND_RATE", "0.10197"))
+FEED_IN_TARIFF = float(_env_str("FEED_IN_TARIFF", "0.03"))
+SUMMER_MONTHS = {12, 1, 2}
+ENERGY_TZ = ZoneInfo(_env_str("ENERGY_TZ", "Australia/Sydney"))
+_daily_energy_history: dict[str, dict] = {}
+_last_esy_sample_at: datetime | None = None
+
 # Per-charge-point state
 _cp_state: dict[str, dict] = {}
 
@@ -244,6 +257,97 @@ async def _hourly_history_loop():
         except Exception as e:
             _LOGGER.error("Hourly history sample error: %s", e)
         await asyncio.sleep(HISTORY_SAMPLE_SECONDS)
+
+
+def _daily_key(ts: datetime) -> str:
+    return ts.astimezone(ENERGY_TZ).strftime("%Y-%m-%d")
+
+
+def _import_rate_for_time(ts: datetime) -> float:
+    local = ts.astimezone(ENERGY_TZ)
+    if 0 <= local.hour < 6:
+        return OFFPEAK_RATE
+    demand = SUMMER_DEMAND_RATE if local.month in SUMMER_MONTHS else NON_SUMMER_DEMAND_RATE
+    return GENERAL_RATE + demand
+
+
+def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_w: float):
+    """Integrate ESY grid telemetry over time into per-day usage/cost buckets."""
+    global _last_esy_sample_at
+    if _last_esy_sample_at is None:
+        _last_esy_sample_at = ts
+        return
+
+    dt_hours = (ts - _last_esy_sample_at).total_seconds() / 3600.0
+    _last_esy_sample_at = ts
+    if dt_hours <= 0:
+        return
+
+    dt_hours = min(dt_hours, 1.0)
+
+    import_kwh = max(0.0, float(grid_import_w)) * dt_hours / 1000.0
+    export_kwh = max(0.0, float(grid_export_w)) * dt_hours / 1000.0
+    cost_delta = (import_kwh * _import_rate_for_time(ts)) - (export_kwh * FEED_IN_TARIFF)
+
+    day_key = _daily_key(ts)
+    bucket = _daily_energy_history.get(day_key, {
+        "import_kwh": 0.0,
+        "export_kwh": 0.0,
+        "net_kwh": 0.0,
+        "cost": 0.0,
+        "samples": 0,
+    })
+    bucket["import_kwh"] += import_kwh
+    bucket["export_kwh"] += export_kwh
+    bucket["net_kwh"] += (import_kwh - export_kwh)
+    bucket["cost"] += cost_delta
+    bucket["samples"] += 1
+    _daily_energy_history[day_key] = bucket
+
+    cutoff_day = (ts.astimezone(ENERGY_TZ) - timedelta(days=DAILY_RETENTION_DAYS)).date()
+    for key in list(_daily_energy_history.keys()):
+        try:
+            if datetime.strptime(key, "%Y-%m-%d").date() < cutoff_day:
+                del _daily_energy_history[key]
+        except Exception:
+            del _daily_energy_history[key]
+
+
+def _daily_usage_60d_for_debug(now: datetime) -> dict:
+    days = []
+    window_import = 0.0
+    window_cost = 0.0
+
+    local_now = now.astimezone(ENERGY_TZ)
+    for offset in range(DAILY_WINDOW_DAYS - 1, -1, -1):
+        day = (local_now - timedelta(days=offset)).date()
+        key = day.isoformat()
+        bucket = _daily_energy_history.get(key, {})
+        import_kwh = float(bucket.get("import_kwh", 0.0))
+        export_kwh = float(bucket.get("export_kwh", 0.0))
+        net_kwh = float(bucket.get("net_kwh", import_kwh - export_kwh))
+        cost = float(bucket.get("cost", 0.0))
+        day_price = (cost / import_kwh) if import_kwh > 0 else 0.0
+        window_import += import_kwh
+        window_cost += cost
+        days.append({
+            "date": key,
+            "usage_kwh": round(import_kwh, 3),
+            "export_kwh": round(export_kwh, 3),
+            "net_kwh": round(net_kwh, 3),
+            "cost": round(cost, 4),
+            "avg_price_per_kw": round(day_price, 5),
+        })
+
+    window_avg = (window_cost / window_import) if window_import > 0 else 0.0
+    for row in days:
+        row["avg_price_60d_per_kw"] = round(window_avg, 5)
+
+    return {
+        "window_days": DAILY_WINDOW_DAYS,
+        "avg_price_per_kw": round(window_avg, 5),
+        "days": days,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +794,11 @@ async def mqtt_listener():
                     if "pvPower" in data:
                         _solar_metrics["pv_power"] = int(float(data["pvPower"]))
                     _solar_metrics["last_update"] = datetime.now(timezone.utc)
+                    _record_daily_energy_sample(
+                        _solar_metrics["last_update"],
+                        _solar_metrics["grid_import"],
+                        _solar_metrics["grid_export"],
+                    )
                 except Exception:
                     pass
 
@@ -742,6 +851,7 @@ async def handle_debug(request):
         },
         "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
         "hourly_history": _hourly_history_for_debug(now),
+        "daily_usage_60d": _daily_usage_60d_for_debug(now),
     })
 
 
