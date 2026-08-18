@@ -158,6 +158,18 @@ export default function App() {
     () => buildDailyUsageSeries(data?.daily_usage_60d),
     [data?.daily_usage_60d],
   );
+  const dailyTicksNarrow = useMemo(() => {
+    if (!isNarrow || dailyChartData.length === 0) return undefined;
+
+    const ticks = [];
+    for (let i = 0; i < dailyChartData.length; i += 10) {
+      ticks.push(dailyChartData[i].label);
+    }
+
+    const endLabel = dailyChartData[dailyChartData.length - 1].label;
+    if (ticks[ticks.length - 1] !== endLabel) ticks.push(endLabel);
+    return ticks;
+  }, [dailyChartData, isNarrow]);
 
   const shiftGraph = (step) => {
     const idx = GRAPH_VIEWS.indexOf(graphView);
@@ -426,7 +438,13 @@ export default function App() {
                   <ResponsiveContainer width="100%" height={240}>
                     <LineChart data={dailyChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
-                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#95a5a6' }} interval={4} />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fontSize: 10, fill: '#95a5a6' }}
+                        interval={isNarrow ? 0 : 4}
+                        ticks={dailyTicksNarrow}
+                        minTickGap={isNarrow ? 18 : 8}
+                      />
                       <YAxis yAxisId="usage" tick={{ fontSize: 12, fill: '#95a5a6' }} unit="kWh" />
                       <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#8d99a6' }} tickFormatter={(v) => '$' + Number(v).toFixed(2)} />
                       <Tooltip
