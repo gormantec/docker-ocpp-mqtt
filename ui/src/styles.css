@@ -610,3 +610,69 @@ body {
   font-size: 12px;
   color: #545B64;
 }
+
+/* ===== PWA Install Banner ===== */
+.pwa-install-banner {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 14px;
+  z-index: 1500;
+  background: rgba(22, 25, 31, 0.96);
+  color: #fff;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35);
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pwa-install-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pwa-install-copy strong {
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.pwa-install-copy span {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.pwa-install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pwa-install-actions .btn {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+@media (min-width: 960px) {
+  .pwa-install-banner {
+    max-width: 420px;
+    left: auto;
+    right: 18px;
+    bottom: 18px;
+  }
+}
+
+@media (max-width: 640px) {
+  .pwa-install-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pwa-install-actions {
+    justify-content: flex-end;
+  }
+}
