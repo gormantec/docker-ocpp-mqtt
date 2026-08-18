@@ -201,6 +201,58 @@ export default function App() {
     finally { setSchedulePending(false); }
   };
 
+  const saveScheduleConfig = async () => {
+    if (!effectiveCpId) {
+      setScheduleMsg({ type: 'error', text: 'No charge point selected' });
+      return;
+    }
+
+    const currentMode = (schedule[effectiveCpId]?.mode) || 'charge_now';
+    const payload = {
+      cp_id: effectiveCpId,
+      mode: currentMode,
+      timezone: editTimezone,
+      periods: [...editPeriods].sort((a, b) => a.start_hour - b.start_hour),
+      solar_smart: editSolarSmart,
+      off_peak_start_hour: editOffPeakStart,
+      off_peak_end_hour: editOffPeakEnd,
+    };
+
+    setSchedulePending(true);
+    try {
+      const res = await fetchWithTimeout(BASE + 'schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }, 12000);
+
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setScheduleMsg({ type: 'error', text: result.error || 'Update failed' });
+        return;
+      }
+
+      const warning = (result.warnings && result.warnings.length > 0)
+        ? ' (' + result.warnings[0] + ')'
+        : '';
+      setScheduleMsg({ type: 'success', text: 'Schedule updated' + warning });
+      setShowConfig(false);
+
+      const schedRes = await fetch(BASE + 'schedule');
+      if (schedRes.ok) {
+        const schedJson = await schedRes.json();
+        setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {});
+      }
+    } catch (e) {
+      setScheduleMsg({
+        type: 'error',
+        text: e?.name === 'AbortError' ? 'Schedule update timed out - charger did not respond' : 'Connection issue',
+      });
+    } finally {
+      setSchedulePending(false);
+    }
+  };
+
   const solar = data?.solar_metrics || {};
 
   const getNow = () => {
@@ -505,7 +557,7 @@ export default function App() {
                 <button className="btn btn-secondary" style={{marginBottom: 16, width: '100%'}} onClick={() => setEditPeriods([...editPeriods, { start_hour: 0, limit_watts: 4800 }])}>+ Add Period</button>
                 <div style={{display: 'flex', gap: 8}}>
                   <button className="btn btn-secondary" style={{flex: 1}} onClick={() => setShowConfig(false)}>Cancel</button>
-                  <button className="btn btn-primary" style={{flex: 1}} disabled={schedulePending} onClick={async () => { setSchedulePending(true); try { const res = await fetch(BASE + 'schedule', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cp_id: effectiveCpId, timezone: editTimezone, periods: editPeriods.sort((a, b) => a.start_hour - b.start_hour), solar_smart: editSolarSmart, off_peak_start_hour: editOffPeakStart, off_peak_end_hour: editOffPeakEnd }) }); if (res.ok) { setScheduleMsg({ type: 'success', text: 'Schedule updated' }); setShowConfig(false); const schedRes = await fetch(BASE + 'schedule'); if (schedRes.ok) { const schedJson = await schedRes.json(); setSchedule(schedJson.schedule_configs || schedJson.schedule_state || {}); } } else { const err = await res.json().catch(() => ({})); setScheduleMsg({ type: 'error', text: err.error || 'Update failed' }); } } catch (e) { setScheduleMsg({ type: 'error', text: 'Connection issue' }); } finally { setSchedulePending(false); } }}>Save</button>
+                  <button className="btn btn-primary" style={{flex: 1}} disabled={schedulePending} onClick={saveScheduleConfig}>Save</button>
                 </div>
               </div>
             </div>

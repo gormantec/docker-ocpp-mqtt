@@ -1555,6 +1555,7 @@ async def main():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/schedule", handle_schedule_get)
     app.router.add_post("/schedule", handle_schedule_post)
+    app.router.add_put("/schedule", handle_schedule_post)
     app.router.add_get("/timezones", handle_timezones)
     app.router.add_get("/test-profile/{cp_id}", handle_test_profile)
 
