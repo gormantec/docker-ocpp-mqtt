@@ -423,7 +423,10 @@ export default function App() {
           <div className="card">
             <div className="card-header">
               <h3>Charging Rules</h3>
-              <span className="badge badge-info">{(() => { const cfg = schedule[effectiveCpId] || {}; const mode = cfg.mode || 'charge_now'; return mode === 'stop' ? '🛑 STOP' : mode === 'auto' ? '⏱ AUTO' : '⚡ CHARGE NOW'; })()}</span>
+              <div className="rules-header-meta">
+                <span className="badge badge-info">{(() => { const cfg = schedule[effectiveCpId] || {}; const mode = cfg.mode || 'charge_now'; return mode === 'stop' ? '🛑 STOP' : mode === 'auto' ? '⏱ AUTO' : '⚡ CHARGE NOW'; })()}</span>
+                <span className="badge badge-neutral">{effectiveCpId ? ('Hour: ' + getNow()) : 'No CP'}</span>
+              </div>
             </div>
             <div className="card-body">
               {!effectiveCpId ? <div className="empty-state"><p>Select a charge point to view rules.</p></div> : (() => {
@@ -434,12 +437,12 @@ export default function App() {
                 for (let i = 0; i < sortedPeriods.length; i++) { if (sortedPeriods[i].start_hour <= currentHour) activeIdx = i; }
                 return (<>
                   {mode === 'stop' && <div className="decision-reason override-notice"><strong>🛑 STOP:</strong> All charging blocked. New sessions rejected.</div>}
-                  {mode === 'charge_now' && <div className="decision-reason"><strong>⚡ CHARGE NOW:</strong> Full power — no schedule restrictions.</div>}
-                  {mode === 'auto' && <div className="decision-reason"><strong>⏱ AUTO:</strong> Time-of-day schedule ({tz})<div className="text-secondary" style={{fontSize: 12, marginTop: 4}}>Current hour: {currentHour}:00 — active period limits charging to {sortedPeriods[activeIdx]?.limit_watts || '?'}W</div></div>}
-                  <ul className="rules-list" style={{marginTop: 12}}>
+                  {mode === 'charge_now' && <div className="decision-reason"><strong>⚡ CHARGE NOW:</strong> Full power mode is active. Schedule limits are bypassed.</div>}
+                  {mode === 'auto' && <div className="decision-reason"><strong>⏱ AUTO:</strong> Time-of-day schedule ({tz})<div className="rules-detail-text">Current hour: {currentHour}:00 — active period limit is {sortedPeriods[activeIdx]?.limit_watts || '?'}W.</div></div>}
+                  <ul className="rules-list rules-list-ocpp">
                     {sortedPeriods.map((p, i) => { const endHour = i < sortedPeriods.length - 1 ? sortedPeriods[i + 1].start_hour : 24; const isActive = mode === 'auto' && i === activeIdx; return (<li key={i} className={isActive ? 'active' : ''}><strong>{String(p.start_hour).padStart(2, '0')}:00–{String(endHour).padStart(2, '0')}:00:</strong> {p.limit_watts > 0 ? p.limit_watts + 'W' : 'BLOCKED'}{isActive ? ' ← active' : ''}</li>); })}
                   </ul>
-                  {cfg.solar_smart && <div className="hint" style={{fontSize: 12, color: '#95a5a6', marginTop: 8}}>☀️ <strong>Solar Smart:</strong> Active — dynamically throttles in peak hours based on grid import/export.{cfg.off_peak_start_hour != null ? ' Off-peak: ' + cfg.off_peak_start_hour + ':00–' + cfg.off_peak_end_hour + ':00.' : ''}</div>}
+                  {cfg.solar_smart && <div className="hint rules-hint">☀️ <strong>Solar Smart:</strong> Active — dynamically throttles in peak hours based on grid import/export.{cfg.off_peak_start_hour != null ? ' Off-peak: ' + cfg.off_peak_start_hour + ':00–' + cfg.off_peak_end_hour + ':00.' : ''}</div>}
                 </>);
               })()}
             </div>

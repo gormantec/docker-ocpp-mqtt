@@ -270,6 +270,67 @@ body {
 .badge-off { background: #FCE8E4; color: var(--aws-red); }
 .badge-warn { background: #FFF3E0; color: #E67A00; }
 .badge-neutral { background: #E8EAED; color: var(--aws-text-secondary); }
+.badge-info { background: #EBF5FF; color: var(--aws-blue); }
+
+/* ===== Charging Rules ===== */
+.rules-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.decision-reason {
+  padding: 12px;
+  background: #EBF5FF;
+  border-radius: 4px;
+  color: var(--aws-blue);
+  margin-bottom: 12px;
+  font-size: 13px;
+  border: 1px solid #D7EAFE;
+}
+
+.rules-detail-text {
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--aws-text-secondary);
+}
+
+.override-notice {
+  background: #FFF5F5;
+  border: 1px solid #FFD5D5;
+  color: var(--aws-red);
+}
+
+.rules-list {
+  list-style: none;
+  font-size: 13px;
+}
+
+.rules-list-ocpp {
+  margin-top: 12px;
+}
+
+.rules-list li {
+  padding: 8px 12px;
+  border-left: 3px solid transparent;
+  margin-bottom: 4px;
+  background: var(--aws-table-header-bg);
+  border-radius: 0 4px 4px 0;
+}
+
+.rules-list li.active {
+  border-left-color: var(--aws-green);
+  background: #E8F5E9;
+}
+
+.rules-list li strong {
+  color: var(--aws-text);
+}
+
+.rules-hint {
+  font-size: 12px;
+  margin-top: 8px;
+}
 
 /* ===== Buttons ===== */
 .btn {
