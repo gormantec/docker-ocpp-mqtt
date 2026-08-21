@@ -191,7 +191,7 @@ Resources:
       Priority: 10
       Actions:
         - Type: forward
-          TargetService: ecs-docker-ocpp-mqtt
+          TargetService: docker-ocpp-mqtt
           TargetPort: 9000
 Outputs:
   LogGroup:
