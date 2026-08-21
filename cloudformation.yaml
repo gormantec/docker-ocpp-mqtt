@@ -182,8 +182,6 @@ Resources:
         DeploymentCircuitBreaker:
           Enable: true
           Rollback: true
-      PlacementConstraints:
-        - Expression: "node.role == manager"
       NetworkAlias: ecs-docker-ocpp-mqtt
   OcppMqttWebapp:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
