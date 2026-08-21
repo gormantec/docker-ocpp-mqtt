@@ -990,11 +990,13 @@ async def _docdb_request(method: str, path: str, body: dict = None):
     url = f"{DOCDB_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
         import aiohttp as _aiohttp
-        auth = None
+        headers = None
         if DOCDB_USER:
-            from aiohttp import BasicAuth
-            auth = BasicAuth(DOCDB_USER, DOCDB_PASSWORD)
-        async with _aiohttp.ClientSession(auth=auth) as sess:
+            from aiohttp import encode_basic_auth
+            headers = {
+                "Authorization": encode_basic_auth(DOCDB_USER, DOCDB_PASSWORD),
+            }
+        async with _aiohttp.ClientSession(headers=headers) as sess:
             if body is not None:
                 async with sess.request(method, url, json=body) as resp:
                     text = await resp.text()
