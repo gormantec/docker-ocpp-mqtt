@@ -107,7 +107,7 @@ flowchart TD
     T1 -- No --> T2{Battery SOC <= priority threshold?}
     T2 -- Yes --> S3[Decision: STOP]
     T2 -- No --> T3{Battery SOC > 70% and PV >= 2000W and grid import <= buffer?}
-    T3 -- Yes --> P4[Set HIGH current]
+    T3 -- Yes --> P4[Set BOOST current]
     T3 -- No --> T4{Grid import > deadband?}
     T4 -- Yes --> S4[Decision: STOP]
     T4 -- No --> T5{Available export power > minimum spare OR strong PV available?}
