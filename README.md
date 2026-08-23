@@ -106,13 +106,17 @@ flowchart TD
     T1 -- Yes --> S2[Decision: ALLOW overnight current]
     T1 -- No --> T2{Battery SOC <= priority threshold?}
     T2 -- Yes --> S3[Decision: STOP]
-    T2 -- No --> T3{Grid import > deadband?}
-    T3 -- Yes --> S4[Decision: STOP]
-    T3 -- No --> T4{Available export power > minimum spare OR strong PV available?}
-    T4 -- No --> S5[Decision: STOP]
-    T4 -- Yes --> T5[Compute usable power]
-    T5 --> T6[Clamp to valid charger steps]
-    T6 --> S6[Decision: CHARGE at computed current]
+    T2 -- No --> T3{Battery SOC > 70% and PV >= 2000W and grid import <= buffer?}
+    T3 -- Yes --> P4[Set HIGH current]
+    T3 -- No --> T4{Grid import > deadband?}
+    T4 -- Yes --> S4[Decision: STOP]
+    T4 -- No --> T5{Available export power > minimum spare OR strong PV available?}
+    T5 -- No --> S5[Decision: STOP]
+    T5 -- Yes --> T6[Compute usable power]
+    T6 --> T7[Clamp to valid charger steps]
+    T7 --> S6[Decision: CHARGE at computed current]
+
+    P4 --> E1
 
     S1 --> E1[Execution adapter]
     P1 --> E1
