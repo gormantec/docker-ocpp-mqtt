@@ -89,6 +89,34 @@ When `solar_smart: true` and mode is AUTO, the bridge dynamically throttles char
 - Ramp step: 480W per check. Floor: 1440W minimum.
 - Throttle is per-CP and communicated via OCPP `SetChargingProfile` (TxDefaultProfile, Recurring+Daily).
 
+### Decision Flow (Mermaid)
+
+```mermaid
+flowchart TD
+    A[30s solar smart tick] --> B{Mode == auto?}
+    B -- No --> Z[No active throttle]
+    B -- Yes --> C{Off-peak window?}
+    C -- Yes --> D[Reset to configured period watt limit]
+    C -- No --> E{Grid import > 500W?}
+    E -- Yes --> F[Direction = down]
+    F --> G{4 consecutive checks?}
+    G -- Yes --> H[Reduce by 480W, floor 1440W]
+    G -- No --> I[Hold current profile]
+
+    E -- No --> J{Battery SOC > 30 and PV > 500W?}
+    J -- Yes --> K[Direction = up]
+    K --> L{20 consecutive checks?}
+    L -- Yes --> M[Increase by 480W up to configured limit]
+    L -- No --> I
+    J -- No --> I
+
+    D --> N[SetChargingProfile]
+    H --> N
+    M --> N
+```
+
+The OCPP scheduler decides the base limit by active time-of-day period, while the solar-smart loop nudges that limit up or down according to live grid import/export and battery health.
+
 ### Data Sources (Web UI)
 
 | Card | Source |
