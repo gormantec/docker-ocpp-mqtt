@@ -108,6 +108,19 @@ export default function App() {
   const [editSolarSmart, setEditSolarSmart] = useState(false);
   const [editOffPeakStart, setEditOffPeakStart] = useState(0);
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
+  const [editEveningStartHour, setEditEveningStartHour] = useState(17);
+  const [editBatteryPrioritySoc, setEditBatteryPrioritySoc] = useState(50);
+  const [editGridDeadbandW, setEditGridDeadbandW] = useState(150);
+  const [editMinimumSpareW, setEditMinimumSpareW] = useState(500);
+  const [editBufferW, setEditBufferW] = useState(500);
+  const [editPvPowerThresholdW, setEditPvPowerThresholdW] = useState(1000);
+  const [editBatteryOnlyMaxAmps, setEditBatteryOnlyMaxAmps] = useState(24);
+  const [editOvernightCurrentAmps, setEditOvernightCurrentAmps] = useState(32);
+  const [editOverrideLowSocThreshold, setEditOverrideLowSocThreshold] = useState(15);
+  const [editOverrideLowCurrent, setEditOverrideLowCurrent] = useState(8);
+  const [editOverrideHighCurrent, setEditOverrideHighCurrent] = useState(16);
+  const [editOverrideBoostCurrent, setEditOverrideBoostCurrent] = useState(32);
+  const [editOverrideSolarBoostThresholdW, setEditOverrideSolarBoostThresholdW] = useState(2000);
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 640);
@@ -229,6 +242,19 @@ export default function App() {
       solar_smart: editSolarSmart,
       off_peak_start_hour: editOffPeakStart,
       off_peak_end_hour: editOffPeakEnd,
+      evening_start_hour: editEveningStartHour,
+      battery_priority_soc: editBatteryPrioritySoc,
+      grid_deadband_w: editGridDeadbandW,
+      minimum_spare_power_w: editMinimumSpareW,
+      buffer_power_w: editBufferW,
+      pv_power_threshold_w: editPvPowerThresholdW,
+      battery_only_max_amps: editBatteryOnlyMaxAmps,
+      overnight_current_amps: editOvernightCurrentAmps,
+      override_low_soc_threshold: editOverrideLowSocThreshold,
+      override_low_current: editOverrideLowCurrent,
+      override_high_current: editOverrideHighCurrent,
+      override_boost_current: editOverrideBoostCurrent,
+      override_solar_boost_threshold_w: editOverrideSolarBoostThresholdW,
     };
 
     setSchedulePending(true);
@@ -333,6 +359,19 @@ export default function App() {
                   setEditSolarSmart(cfg.solar_smart || false);
                   setEditOffPeakStart(cfg.off_peak_start_hour ?? 0);
                   setEditOffPeakEnd(cfg.off_peak_end_hour ?? 6);
+                  setEditEveningStartHour(cfg.evening_start_hour ?? 17);
+                  setEditBatteryPrioritySoc(cfg.battery_priority_soc ?? 50);
+                  setEditGridDeadbandW(cfg.grid_deadband_w ?? 150);
+                  setEditMinimumSpareW(cfg.minimum_spare_power_w ?? 500);
+                  setEditBufferW(cfg.buffer_power_w ?? 500);
+                  setEditPvPowerThresholdW(cfg.pv_power_threshold_w ?? 1000);
+                  setEditBatteryOnlyMaxAmps(cfg.battery_only_max_amps ?? 24);
+                  setEditOvernightCurrentAmps(cfg.overnight_current_amps ?? 32);
+                  setEditOverrideLowSocThreshold(cfg.override_low_soc_threshold ?? 15);
+                  setEditOverrideLowCurrent(cfg.override_low_current ?? 8);
+                  setEditOverrideHighCurrent(cfg.override_high_current ?? 16);
+                  setEditOverrideBoostCurrent(cfg.override_boost_current ?? 32);
+                  setEditOverrideSolarBoostThresholdW(cfg.override_solar_boost_threshold_w ?? 2000);
                   setShowConfig(true);
                 }}>⚙</button>
             </div>
@@ -565,6 +604,36 @@ export default function App() {
                     <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak End</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value) || 0)} className="ocpp-input ocpp-input-sm" /></div>
                   </div>)}
                 </div>
+
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Evening Start Hour</label><input type="number" min={0} max={23} value={editEveningStartHour} onChange={(e) => setEditEveningStartHour(parseInt(e.target.value, 10) || 17)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Overnight Current A</label><input type="number" min={8} max={32} value={editOvernightCurrentAmps} onChange={(e) => setEditOvernightCurrentAmps(parseInt(e.target.value, 10) || 32)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Battery Priority SOC %</label><input type="number" min={0} max={100} value={editBatteryPrioritySoc} onChange={(e) => setEditBatteryPrioritySoc(parseInt(e.target.value, 10) || 50)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Grid Deadband W</label><input type="number" min={0} max={5000} value={editGridDeadbandW} onChange={(e) => setEditGridDeadbandW(parseInt(e.target.value, 10) || 150)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Minimum Spare W</label><input type="number" min={0} max={10000} value={editMinimumSpareW} onChange={(e) => setEditMinimumSpareW(parseInt(e.target.value, 10) || 500)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Buffer W</label><input type="number" min={0} max={10000} value={editBufferW} onChange={(e) => setEditBufferW(parseInt(e.target.value, 10) || 500)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">PV Threshold W</label><input type="number" min={0} max={20000} value={editPvPowerThresholdW} onChange={(e) => setEditPvPowerThresholdW(parseInt(e.target.value, 10) || 1000)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Battery-Only Max A</label><input type="number" min={8} max={32} value={editBatteryOnlyMaxAmps} onChange={(e) => setEditBatteryOnlyMaxAmps(parseInt(e.target.value, 10) || 24)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Low SOC %</label><input type="number" min={0} max={100} value={editOverrideLowSocThreshold} onChange={(e) => setEditOverrideLowSocThreshold(parseInt(e.target.value, 10) || 15)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Solar Boost W</label><input type="number" min={0} max={20000} value={editOverrideSolarBoostThresholdW} onChange={(e) => setEditOverrideSolarBoostThresholdW(parseInt(e.target.value, 10) || 2000)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Low A</label><input type="number" min={8} max={32} value={editOverrideLowCurrent} onChange={(e) => setEditOverrideLowCurrent(parseInt(e.target.value, 10) || 8)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Override High A</label><input type="number" min={8} max={32} value={editOverrideHighCurrent} onChange={(e) => setEditOverrideHighCurrent(parseInt(e.target.value, 10) || 16)} className="ocpp-input ocpp-input-sm" /></div>
+                </div>
+                <div className="ocpp-period-row">
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Boost A</label><input type="number" min={8} max={32} value={editOverrideBoostCurrent} onChange={(e) => setEditOverrideBoostCurrent(parseInt(e.target.value, 10) || 32)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}></div>
+                </div>
+
                 <p className="hint ocpp-help-text" style={{marginBottom: 16, fontSize: 13}}>Each period sets a power limit starting at a given hour. Schedule repeats <strong>daily</strong>.</p>
                 {editPeriods.map((p, i) => (
                   <div key={i} className="ocpp-period-row">

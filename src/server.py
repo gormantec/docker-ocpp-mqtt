@@ -928,10 +928,23 @@ DEFAULT_SCHEDULE = {
         {"start_hour": 0, "limit_watts": 4800.0},
         {"start_hour": 16, "limit_watts": 1440.0},
     ],
-    # Solar Smart: dynamically throttle charging based on grid import/export
+    # Shared decision settings to match the SEVR-X1 controller UI
     "solar_smart": False,
-    "off_peak_start_hour": 0,   # off-peak grid window (cheap power, allow grid import)
+    "off_peak_start_hour": 0,
     "off_peak_end_hour": 6,
+    "evening_start_hour": 17,
+    "overnight_current_amps": 32,
+    "battery_priority_soc": 50,
+    "grid_deadband_w": 150,
+    "minimum_spare_power_w": 500,
+    "buffer_power_w": 500,
+    "pv_power_threshold_w": 1000,
+    "battery_only_max_amps": 24,
+    "override_low_soc_threshold": 15,
+    "override_low_current": 8,
+    "override_high_current": 16,
+    "override_boost_current": 32,
+    "override_solar_boost_threshold_w": 2000,
 }
 
 # Common timezones for UI dropdown
@@ -1271,6 +1284,30 @@ async def handle_schedule_post(request):
             if not (0 <= h <= 23):
                 return web.json_response({"error": f"Invalid off_peak_end_hour: {h}"}, status=400)
             config["off_peak_end_hour"] = h
+        if "evening_start_hour" in body:
+            h = int(body["evening_start_hour"])
+            if not (0 <= h <= 23):
+                return web.json_response({"error": f"Invalid evening_start_hour: {h}"}, status=400)
+            config["evening_start_hour"] = h
+        for key, default, lo, hi in (
+            ("overnight_current_amps", 32, 8, 32),
+            ("battery_priority_soc", 50, 0, 100),
+            ("grid_deadband_w", 150, 0, 5000),
+            ("minimum_spare_power_w", 500, 0, 10000),
+            ("buffer_power_w", 500, 0, 10000),
+            ("pv_power_threshold_w", 1000, 0, 20000),
+            ("battery_only_max_amps", 24, 8, 32),
+            ("override_low_soc_threshold", 15, 0, 100),
+            ("override_low_current", 8, 8, 32),
+            ("override_high_current", 16, 8, 32),
+            ("override_boost_current", 32, 8, 32),
+            ("override_solar_boost_threshold_w", 2000, 0, 20000),
+        ):
+            if key in body:
+                value = int(body[key])
+                if not (lo <= value <= hi):
+                    return web.json_response({"error": f"Invalid {key}: {value}"}, status=400)
+                config[key] = value
 
         # Validate and store periods for auto mode
         periods = None
