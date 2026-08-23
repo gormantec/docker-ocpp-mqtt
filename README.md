@@ -89,33 +89,47 @@ When `solar_smart: true` and mode is AUTO, the bridge dynamically throttles char
 - Ramp step: 480W per check. Floor: 1440W minimum.
 - Throttle is per-CP and communicated via OCPP `SetChargingProfile` (TxDefaultProfile, Recurring+Daily).
 
-### Decision Flow (Mermaid)
+### Unified Decision Model (Mermaid)
 
 ```mermaid
 flowchart TD
-    A[30s solar smart tick] --> B{Mode == auto?}
-    B -- No --> Z[No active throttle]
-    B -- Yes --> C{Off-peak window?}
-    C -- Yes --> D[Reset to configured period watt limit]
-    C -- No --> E{Grid import > 500W?}
-    E -- Yes --> F[Direction = down]
-    F --> G{4 consecutive checks?}
-    G -- Yes --> H[Reduce by 480W, floor 1440W]
-    G -- No --> I[Hold current profile]
+    A[Inputs: time, SOC, PV, grid import/export, manual override] --> B{Override active?}
+    B -- Yes --> C{Override = ON or OFF?}
+    C -- OFF --> S1[Decision: STOP]
+    C -- ON --> G1{Battery SOC <= low threshold?}
+    G1 -- Yes --> P1[Set LOW current]
+    G1 -- No --> G2{SOC > battery priority and PV >= boost threshold and grid import <= buffer?}
+    G2 -- Yes --> P2[Set BOOST current]
+    G2 -- No --> P3[Set HIGH current]
 
-    E -- No --> J{Battery SOC > 30 and PV > 500W?}
-    J -- Yes --> K[Direction = up]
-    K --> L{20 consecutive checks?}
-    L -- Yes --> M[Increase by 480W up to configured limit]
-    L -- No --> I
-    J -- No --> I
+    B -- No --> T1{Off-peak time window?}
+    T1 -- Yes --> S2[Decision: ALLOW overnight current]
+    T1 -- No --> T2{Battery SOC <= priority threshold?}
+    T2 -- Yes --> S3[Decision: STOP]
+    T2 -- No --> T3{Grid import > deadband?}
+    T3 -- Yes --> S4[Decision: STOP]
+    T3 -- No --> T4{Available export power > minimum spare OR strong PV available?}
+    T4 -- No --> S5[Decision: STOP]
+    T4 -- Yes --> T5[Compute usable power]
+    T5 --> T6[Clamp to valid charger steps]
+    T6 --> S6[Decision: CHARGE at computed current]
 
-    D --> N[SetChargingProfile]
-    H --> N
-    M --> N
+    S1 --> E1[Execution adapter]
+    P1 --> E1
+    P2 --> E1
+    P3 --> E1
+    S2 --> E1
+    S3 --> E1
+    S4 --> E1
+    S5 --> E1
+    S6 --> E1
+
+    E1 --> E2{Adapter type}
+    E2 -- X1 app --> X1[Tuya API: set switch/current]
+    E2 -- OCPP --> OCPP[OCPP profile/SetChargingProfile + RemoteStop if required]
 ```
 
-The OCPP scheduler decides the base limit by active time-of-day period, while the solar-smart loop nudges that limit up or down according to live grid import/export and battery health.
+The OCPP bridge and the X1 controller both evaluate the same decision tree. The only difference is the delivery mechanism: one writes charger state through Tuya commands, and the other enforces the limit through OCPP charging profiles and remote-stop semantics.
 
 ### Data Sources (Web UI)
 
