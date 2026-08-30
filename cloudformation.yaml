@@ -178,11 +178,11 @@ Resources:
       TaskDefinition: !Ref OcppMqttTaskDefinition
       DesiredCount: 1
       LaunchType: FARGATE
-      # NAS volumes are only mounted on the Swarm master. Pin this service
-      # to docker-two so the DocumentDB mount is reachable.
+      # NAS volumes are only mounted on the Swarm manager. Keep the service on
+      # any manager node rather than a specific hostname.
       PlacementConstraints:
         - Type: distinctInstance
-          Expression: node.hostname==docker-two
+          Expression: node.role == manager
       DeploymentConfiguration:
         DeploymentCircuitBreaker:
           Enable: true
