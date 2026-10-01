@@ -22,6 +22,8 @@ import asyncio
 import json
 import time
 import base64
+from urllib.parse import quote
+from uuid import uuid4
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, available_timezones
 from collections import deque
@@ -54,6 +56,13 @@ from ocpp.v16.call import (
 
 # Shared MQTT helpers (same pattern as other docker-iot containers)
 from mqtt_connect import build_mqtt_context
+from charge_history import (
+    add_energy_delta,
+    close_monitoring_gap,
+    open_monitoring_gap,
+    parse_meter_values,
+    record_session_meter,
+)
 
 logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
@@ -127,7 +136,11 @@ DOCDB_URL = _env_str("DOCDB_URL", "")
 DOCDB_USER = _env_str("DOCDB_USER", "admin")
 DOCDB_PASSWORD = _env_str("DOCDB_PASSWORD", "password")
 DOCDB_ENABLED = bool(DOCDB_URL)
-DOCDB_DB = "ocpp_mqtt"
+DOCDB_DB = _env_str("DOCDB_DB", "ocpp_mqtt")
+CHARGE_HISTORY_RETENTION_DAYS = _env_int("CHARGE_HISTORY_RETENTION_DAYS", 90)
+MAX_SESSION_SAMPLES = _env_int("MAX_SESSION_SAMPLES", 720)
+MAX_PERSISTED_EVENTS = _env_int("MAX_PERSISTED_EVENTS", 500)
+METER_HISTORY_SAMPLE_SECONDS = _env_int("METER_HISTORY_SAMPLE_SECONDS", 60)
 
 def _docdb_key(cp_id: str, doc_type: str) -> str:
     """Build a namespaced DocumentDB key: {cp_id}:{type}"""
@@ -139,12 +152,19 @@ STARTED_AT = datetime.now(timezone.utc)
 # Event ring buffer
 MAX_EVENTS = 200
 _event_buffer: deque = deque(maxlen=MAX_EVENTS)
+_persisted_event_types = {
+    "connected", "disconnected", "boot_notification", "status_notification",
+    "start_transaction", "stop_transaction", "remote_start", "firmware_status",
+    "diagnostics_status", "cmd_received", "solar_throttle", "schedule",
+}
 
 # Backend-maintained charging history for 96h UI backfill
 HISTORY_WINDOW_HOURS = _env_int("HISTORY_WINDOW_HOURS", 96)
 HISTORY_RETENTION_HOURS = _env_int("HISTORY_RETENTION_HOURS", 192)
 HISTORY_SAMPLE_SECONDS = _env_int("HISTORY_SAMPLE_SECONDS", 60)
 _hourly_history: dict[str, dict] = {}
+_dirty_hourly_history: set[str] = set()
+_expired_history_docs: set[str] = set()
 SCHEDULE_OCPP_TIMEOUT_SECONDS = float(_env_str("SCHEDULE_OCPP_TIMEOUT_SECONDS", "8"))
 
 # Daily usage/cost graph settings
@@ -158,10 +178,15 @@ FEED_IN_TARIFF = float(_env_str("FEED_IN_TARIFF", "0.03"))
 SUMMER_MONTHS = {12, 1, 2}
 ENERGY_TZ = ZoneInfo(_env_str("ENERGY_TZ", "Australia/Sydney"))
 _daily_energy_history: dict[str, dict] = {}
+_dirty_daily_energy_history: set[str] = set()
 _last_esy_sample_at: datetime | None = None
 
 # Per-charge-point state
 _cp_state: dict[str, dict] = {}
+_charge_sessions: dict[str, dict] = {}
+_active_charge_sessions: dict[str, str] = {}
+_docdb_write_lock = asyncio.Lock()
+_last_transaction_id = int(time.time())
 
 # MQTT client reference (set after connection)
 _mqtt_client = None
@@ -182,13 +207,16 @@ async def _mqtt_publish(topic: str, payload: dict):
         except Exception as e:
             _LOGGER.error("MQTT publish failed for %s: %s", topic, e)
 
-def _record_event(cp_id: str, event_type: str, summary: str = ""):
+def _record_event(cp_id: str, event_type: str, summary: str = "", details=None,
+                  persist=True):
     event = {
         "time": datetime.now(timezone.utc).isoformat(),
         "charge_point_id": cp_id,
         "type": event_type,
         "summary": summary,
     }
+    if details:
+        event["details"] = details
     _event_buffer.append(event)
     if cp_id not in _cp_state:
         _cp_state[cp_id] = {"id": cp_id, "connected": True, "status": "unknown",
@@ -196,6 +224,12 @@ def _record_event(cp_id: str, event_type: str, summary: str = ""):
                             "connectors": {},  # per-connector -> status
                             "meter_values": {}}  # per-connector -> {power, energy, timestamp}
     _cp_state[cp_id]["last_event"] = event["time"]
+    if persist and DOCDB_ENABLED and event_type in _persisted_event_types:
+        try:
+            asyncio.get_running_loop().create_task(_docdb_save_event(event))
+        except RuntimeError:
+            _LOGGER.warning("Could not persist %s event outside the async loop", event_type)
+    return event
 
 
 def _hour_bucket_key(ts: datetime) -> str:
@@ -224,15 +258,27 @@ def _record_hourly_sample(ts: datetime | None = None):
     bucket = _hourly_history.get(bucket_key, {"sum_kw": 0.0, "samples": 0})
     bucket["sum_kw"] += _current_total_power_watts() / 1000.0
     bucket["samples"] += 1
+    for metric, output in (
+        ("pv_power", "pv_kw"),
+        ("grid_export", "grid_export_kw"),
+        ("grid_import", "grid_import_kw"),
+        ("load_power", "load_kw"),
+    ):
+        bucket[f"sum_{output}"] = bucket.get(f"sum_{output}", 0.0) + max(
+            0.0, float(_solar_metrics.get(metric) or 0)
+        ) / 1000.0
     _hourly_history[bucket_key] = bucket
+    _dirty_hourly_history.add(bucket_key)
 
     cutoff = now - timedelta(hours=HISTORY_RETENTION_HOURS)
     for key in list(_hourly_history.keys()):
         try:
             if datetime.fromisoformat(key) < cutoff:
                 del _hourly_history[key]
+                _expired_history_docs.add(f"history:hourly:{key}")
         except Exception:
             del _hourly_history[key]
+            _expired_history_docs.add(f"history:hourly:{key}")
 
 
 def _hourly_history_for_debug(now: datetime) -> dict:
@@ -242,8 +288,13 @@ def _hourly_history_for_debug(now: datetime) -> dict:
         slot = base - timedelta(hours=offset)
         key = slot.isoformat()
         bucket = _hourly_history.get(key)
-        kw = (bucket["sum_kw"] / bucket["samples"]) if bucket and bucket.get("samples") else 0.0
-        samples.append({"hour": key, "kw": round(kw, 3)})
+        count = bucket.get("samples", 0) if bucket else 0
+        point = {"hour": key, "kw": 0.0, "samples": count}
+        if count:
+            point["kw"] = round(bucket.get("sum_kw", 0.0) / count, 3)
+            for metric in ("pv_kw", "grid_export_kw", "grid_import_kw", "load_kw"):
+                point[metric] = round(bucket.get(f"sum_{metric}", 0.0) / count, 3)
+        samples.append(point)
     return {
         "window_hours": HISTORY_WINDOW_HOURS,
         "samples": samples,
@@ -255,6 +306,7 @@ async def _hourly_history_loop():
     while True:
         try:
             _record_hourly_sample(datetime.now(timezone.utc))
+            await _docdb_flush_graph_history()
         except Exception as e:
             _LOGGER.error("Hourly history sample error: %s", e)
         await asyncio.sleep(HISTORY_SAMPLE_SECONDS)
@@ -307,14 +359,17 @@ def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_
     bucket["cost"] += cost_delta
     bucket["samples"] += 1
     _daily_energy_history[day_key] = bucket
+    _dirty_daily_energy_history.add(day_key)
 
     cutoff_day = (ts.astimezone(ENERGY_TZ) - timedelta(days=DAILY_RETENTION_DAYS)).date()
     for key in list(_daily_energy_history.keys()):
         try:
             if datetime.strptime(key, "%Y-%m-%d").date() < cutoff_day:
                 del _daily_energy_history[key]
+                _expired_history_docs.add(f"history:daily:{key}")
         except Exception:
             del _daily_energy_history[key]
+            _expired_history_docs.add(f"history:daily:{key}")
 
 
 def _daily_usage_60d_for_debug(now: datetime) -> dict:
@@ -359,6 +414,121 @@ def _daily_usage_60d_for_debug(now: datetime) -> dict:
 # ---------------------------------------------------------------------------
 # MQTT-tracking ChargePoint
 # ---------------------------------------------------------------------------
+
+def _parse_utc_time(value):
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _charge_session_key(cp_id, connector_id):
+    return f"{cp_id}:{connector_id}"
+
+
+def _find_active_charge_session(cp_id, transaction_id=None):
+    for session_id in _active_charge_sessions.values():
+        session = _charge_sessions.get(session_id)
+        if not session or session.get("charge_point_id") != cp_id:
+            continue
+        if transaction_id is None or session.get("transaction_id") == transaction_id:
+            return session
+    return None
+
+
+def _get_or_create_charge_session(cp_id, connector_id, received_at, source):
+    key = _charge_session_key(cp_id, connector_id)
+    existing_id = _active_charge_sessions.get(key)
+    existing = _charge_sessions.get(existing_id) if existing_id else None
+    if existing and not existing.get("ended_at"):
+        return existing
+
+    session_id = uuid4().hex
+    document_id = f"charge:{cp_id}:{session_id}"
+    session = {
+        "_id": document_id,
+        "session_id": session_id,
+        "charge_point_id": cp_id,
+        "connector_id": int(connector_id),
+        "state": "plugged",
+        "health": "ok",
+        "source": source,
+        "plugged_at": received_at.isoformat(),
+        "last_event_at": received_at.isoformat(),
+        "ended_at": None,
+        "transaction_id": None,
+        "meter_start_wh": None,
+        "last_energy_wh": None,
+        "energy_delivered_wh": 0.0,
+        "meter_resets": 0,
+        "soc_start_percent": None,
+        "soc_end_percent": None,
+        "soc_min_percent": None,
+        "soc_max_percent": None,
+        "samples": [],
+        "faults": [],
+        "monitoring_gaps": [],
+    }
+    _charge_sessions[document_id] = session
+    _active_charge_sessions[key] = document_id
+    return session
+
+
+async def _persist_charge_session(session):
+    if not DOCDB_ENABLED:
+        return
+    session["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if not await _docdb_put_document(session):
+        _LOGGER.error("Could not persist charge session %s", session.get("session_id"))
+
+
+async def _mark_charge_point_reconnected(cp_id, reconnected_at):
+    for session_id in tuple(_active_charge_sessions.values()):
+        session = _charge_sessions.get(session_id)
+        if not session or session.get("charge_point_id") != cp_id:
+            continue
+        open_gap = next((
+            gap for gap in reversed(session.get("monitoring_gaps", []))
+            if not gap.get("ended_at")
+        ), None)
+        if open_gap and close_monitoring_gap(session, reconnected_at):
+            await _persist_charge_session(session)
+
+
+def _allocate_transaction_id():
+    global _last_transaction_id
+    _last_transaction_id = max(int(time.time()), _last_transaction_id + 1)
+    return _last_transaction_id
+
+
+def _charge_session_summary(session):
+    fields = (
+        "session_id", "charge_point_id", "connector_id", "state", "health",
+        "plugged_at", "transaction_started_at", "ended_at", "complete",
+        "transaction_id", "meter_start_wh", "last_energy_wh", "meter_stop_wh",
+        "energy_delivered_wh", "meter_resets", "stop_reason", "soc_start_percent",
+        "soc_end_percent", "soc_min_percent", "soc_max_percent", "faults",
+        "monitoring_gaps", "last_event_at", "last_history_sample_at",
+    )
+    result = {field: session.get(field) for field in fields}
+    result["sample_count"] = len(session.get("samples", []))
+    return result
+
+
+def _recent_charge_sessions(cp_id, limit=20):
+    sessions = [
+        session for session in _charge_sessions.values()
+        if session.get("charge_point_id") == cp_id
+    ]
+    sessions.sort(key=lambda session: session.get("plugged_at", ""), reverse=True)
+    return [_charge_session_summary(session) for session in sessions[:limit]]
+
 
 class MqttChargePoint(BaseChargePoint):
     """
@@ -414,6 +584,7 @@ class MqttChargePoint(BaseChargePoint):
     async def on_status_notification(self, connector_id, error_code, status,
                                       info=None, vendor_id=None, **kwargs):
         cp_id = self.id
+        received_at = datetime.now(timezone.utc)
         summary = f"status={status}"
         if connector_id is not None:
             summary += f" connector={connector_id}"
@@ -421,7 +592,16 @@ class MqttChargePoint(BaseChargePoint):
             summary += f" error={error_code}"
 
         _LOGGER.info("StatusNotification from %s: %s", cp_id, summary)
-        _record_event(cp_id, "status_notification", summary)
+        charger_timestamp = kwargs.get("timestamp")
+        _record_event(cp_id, "status_notification", summary, {
+            "connector_id": connector_id,
+            "status": status,
+            "error_code": error_code,
+            "info": info,
+            "vendor_id": vendor_id,
+            "charger_timestamp": charger_timestamp,
+            "received_at": received_at.isoformat(),
+        })
 
         if cp_id in _cp_state:
             # Track per-connector status in a clean dict
@@ -429,6 +609,44 @@ class MqttChargePoint(BaseChargePoint):
             _cp_state[cp_id]["connectors"][conn_key] = status
             if connector_id is not None:
                 _cp_state[cp_id]["connector_id"] = connector_id
+
+        session = None
+        try:
+            physical_connector = int(connector_id) if connector_id is not None else 0
+        except (TypeError, ValueError):
+            physical_connector = 0
+        if physical_connector > 0:
+            if status == "Preparing":
+                session = _get_or_create_charge_session(cp_id, physical_connector, received_at, "connector_status")
+            elif status in {"Charging", "SuspendedEV", "SuspendedEVSE", "Finishing", "Faulted"}:
+                session = _get_or_create_charge_session(cp_id, physical_connector, received_at, "connector_status")
+            elif status == "Available":
+                session = _find_active_charge_session(cp_id)
+                if session and session.get("connector_id") == physical_connector:
+                    session["ended_at"] = received_at.isoformat()
+                    session["state"] = "completed" if session.get("transaction_started_at") else "unplugged"
+                    session["complete"] = True
+                    session["stop_reason"] = "connector_available"
+                    _active_charge_sessions.pop(_charge_session_key(cp_id, physical_connector), None)
+
+        if session:
+            session["last_event_at"] = received_at.isoformat()
+            session["last_connector_status"] = status
+            session["charger_timestamp"] = charger_timestamp
+            if status == "Charging":
+                session["state"] = "charging"
+            elif status in {"SuspendedEV", "SuspendedEVSE"}:
+                session["state"] = "suspended"
+            elif status == "Finishing":
+                session["state"] = "finishing"
+            elif status == "Faulted" or (error_code and error_code != "NoError"):
+                session["health"] = "faulted"
+                session.setdefault("faults", []).append({
+                    "time": received_at.isoformat(),
+                    "error_code": error_code,
+                    "info": info,
+                })
+            await _persist_charge_session(session)
 
         # Car plugged in & ready — try to start if charging is allowed
         if status == "Preparing" and _is_charging_allowed(cp_id):
@@ -473,37 +691,100 @@ class MqttChargePoint(BaseChargePoint):
     @on("StartTransaction")
     async def on_start_transaction(self, connector_id, id_tag, meter_start,
                                     timestamp=None, reservation_id=None, **kwargs):
-        _LOGGER.info("StartTransaction from %s: id_tag=%s connector=%s meter=%s",
-                     self.id, id_tag, connector_id, meter_start)
-        _record_event(self.id, "start_transaction",
-                      f"id_tag={id_tag} meter_start={meter_start}")
+        received_at = datetime.now(timezone.utc)
+        transaction_id = _allocate_transaction_id()
+        _LOGGER.info("StartTransaction from %s: connector=%s meter_start=%s",
+                     self.id, connector_id, meter_start)
+        event = _record_event(self.id, "start_transaction", f"meter_start={meter_start}", {
+            "connector_id": connector_id,
+            "meter_start_wh": meter_start,
+            "transaction_id": transaction_id,
+            "charger_timestamp": timestamp,
+            "received_at": received_at.isoformat(),
+        }, persist=False)
+        try:
+            connector = int(connector_id)
+        except (TypeError, ValueError):
+            connector = 1
+        session = _get_or_create_charge_session(self.id, connector, received_at, "start_transaction")
+        meter_start_value = None
+        try:
+            meter_start_value = float(meter_start)
+        except (TypeError, ValueError):
+            pass
+        if meter_start_value is not None and session.get("last_energy_wh") is None:
+            session["meter_start_wh"] = meter_start_value
+            session["last_energy_wh"] = meter_start_value
+        session["transaction_id"] = transaction_id
+        session["transaction_started_at"] = received_at.isoformat()
+        session["charger_start_timestamp"] = timestamp
+        session["state"] = "charging"
+        session["last_event_at"] = received_at.isoformat()
+        await _persist_charge_session(session)
+        await _docdb_save_event(event)
         if self.id in _cp_state:
             _cp_state[self.id]["status"] = "Charging"
 
         payload = {
             "connector_id": connector_id, "id_tag": id_tag,
             "meter_start": meter_start, "timestamp": timestamp,
-            "reservation_id": reservation_id,
+            "reservation_id": reservation_id, "transaction_id": transaction_id,
         }
         await _mqtt_publish(_cp_topic(self.id, "start_transaction"), payload)
         return ocpp_result.StartTransaction(
-            transaction_id=1,
+            transaction_id=transaction_id,
             id_tag_info={"status": AuthorizationStatus.accepted},
         )
 
     @on("StopTransaction")
     async def on_stop_transaction(self, meter_stop, timestamp, transaction_id,
-                                   reason=None, id_tag=None, **kwargs):
+                                   reason=None, id_tag=None, transaction_data=None, **kwargs):
+        received_at = datetime.now(timezone.utc)
         _LOGGER.info("StopTransaction from %s: meter_stop=%s reason=%s",
                      self.id, meter_stop, reason)
-        _record_event(self.id, "stop_transaction",
-                      f"meter_stop={meter_stop} reason={reason}")
+        session = _find_active_charge_session(self.id, transaction_id)
+        if session is None:
+            session = _find_active_charge_session(self.id)
+        if session and transaction_data:
+            for sample in parse_meter_values(transaction_data):
+                record_session_meter(
+                    session, sample, received_at, METER_HISTORY_SAMPLE_SECONDS,
+                    MAX_SESSION_SAMPLES,
+                )
+        if session:
+            try:
+                session["meter_stop_wh"] = float(meter_stop)
+                add_energy_delta(session, meter_stop)
+            except (TypeError, ValueError):
+                session["meter_stop_wh"] = None
+            session["ended_at"] = received_at.isoformat()
+            session["state"] = "completed"
+            session["complete"] = True
+            session["stop_reason"] = reason
+            session["charger_stop_timestamp"] = timestamp
+            session["last_event_at"] = received_at.isoformat()
+            _active_charge_sessions.pop(
+                _charge_session_key(self.id, session.get("connector_id")), None
+            )
+        event = _record_event(self.id, "stop_transaction",
+                              f"meter_stop={meter_stop} reason={reason}", {
+            "transaction_id": transaction_id,
+            "meter_stop_wh": meter_stop,
+            "reason": reason,
+            "charger_timestamp": timestamp,
+            "received_at": received_at.isoformat(),
+            "energy_delivered_wh": session.get("energy_delivered_wh") if session else None,
+        }, persist=False)
+        if session:
+            await _persist_charge_session(session)
+        await _docdb_save_event(event)
         if self.id in _cp_state:
             _cp_state[self.id]["status"] = "Available"
 
         payload = {
             "meter_stop": meter_stop, "timestamp": timestamp,
             "transaction_id": transaction_id, "reason": reason, "id_tag": id_tag,
+            "energy_delivered_wh": session.get("energy_delivered_wh") if session else None,
         }
         await _mqtt_publish(_cp_topic(self.id, "stop_transaction"), payload)
         return ocpp_result.StopTransaction(
@@ -513,34 +794,30 @@ class MqttChargePoint(BaseChargePoint):
     @on("MeterValues")
     async def on_meter_values(self, connector_id, meter_value, **kwargs):
         _LOGGER.debug("MeterValues from %s: connector=%s", self.id, connector_id)
+        received_at = datetime.now(timezone.utc)
+        cp = _cp_state.get(self.id)
+        conn_key = str(connector_id) if connector_id is not None else "0"
+        session_id = _active_charge_sessions.get(_charge_session_key(self.id, conn_key))
+        session = _charge_sessions.get(session_id) if session_id else None
+        for sample in parse_meter_values(meter_value):
+            sample_time = sample.get("timestamp") or received_at.isoformat()
+            if cp:
+                cp["meter_values"][conn_key] = {
+                    "power": sample.get("power_w"),
+                    "energy": sample.get("energy_wh"),
+                    "soc_percent": sample.get("soc_percent"),
+                    "current_a": sample.get("current_a"),
+                    "voltage_v": sample.get("voltage_v"),
+                    "timestamp": sample_time,
+                    "received_at": received_at.isoformat(),
+                }
+            if session and record_session_meter(
+                session, sample, received_at, METER_HISTORY_SAMPLE_SECONDS, MAX_SESSION_SAMPLES
+            ):
+                await _persist_charge_session(session)
+
         payload = {"connector_id": connector_id, "meter_value": meter_value}
         await _mqtt_publish(_cp_topic(self.id, "meter_values"), payload)
-
-        # Extract live power/energy readings for the UI
-        cp = _cp_state.get(self.id)
-        if cp and isinstance(meter_value, list) and len(meter_value) > 0:
-            conn_key = str(connector_id) if connector_id is not None else "0"
-            mv = meter_value[0]  # first MeterValue entry
-            sampled = mv.get("sampledValue", []) if isinstance(mv, dict) else []
-            power = None
-            energy = None
-            for sv in sampled:
-                measurand = sv.get("measurand", "")
-                if "Power.Active.Import" in measurand:
-                    try:
-                        power = float(sv.get("value", 0))
-                    except (ValueError, TypeError):
-                        pass
-                elif "Energy.Active.Import.Register" in measurand:
-                    try:
-                        energy = float(sv.get("value", 0))
-                    except (ValueError, TypeError):
-                        pass
-            cp["meter_values"][conn_key] = {
-                "power": power,
-                "energy": energy,
-                "timestamp": mv.get("timestamp", datetime.now(timezone.utc).isoformat()) if isinstance(mv, dict) else datetime.now(timezone.utc).isoformat(),
-            }
 
         return ocpp_result.MeterValues()
 
@@ -576,6 +853,13 @@ class MqttChargePoint(BaseChargePoint):
         if cp_id in _cp_state:
             _cp_state[cp_id]["connected"] = False
             _cp_state[cp_id]["status"] = "Unavailable"
+        for session_id in _active_charge_sessions.values():
+            session = _charge_sessions.get(session_id)
+            if session and session.get("charge_point_id") == cp_id:
+                open_monitoring_gap(
+                    session, datetime.now(timezone.utc), "charge_point_disconnected"
+                )
+                await _persist_charge_session(session)
         await _mqtt_publish(_cp_topic(cp_id, "disconnected"), {})
 
 
@@ -650,6 +934,7 @@ async def ocpp_ws_handler(request: web.Request):
     adapted = _AiohttpWsAdapter(ws)
     cp = MqttChargePoint(cp_id, adapted)
     _active_cps[cp_id] = cp
+    await _mark_charge_point_reconnected(cp_id, datetime.now(timezone.utc))
 
     try:
         await cp.start()
@@ -837,6 +1122,8 @@ async def handle_debug(request):
         not cp.get("connected", False),
         cp.get("last_event") or "",
     ))
+    for cp in charge_points:
+        cp["recent_charge_sessions"] = _recent_charge_sessions(cp["id"])
 
     recent_events = list(_event_buffer)
     recent_events.reverse()
@@ -1029,6 +1316,176 @@ async def _docdb_request(method: str, path: str, body: dict = None):
     except Exception as e:
         _LOGGER.warning("DocDB request failed (%s %s): %s", method, path, e)
         return False, {}
+
+
+def _docdb_document_path(doc_id: str) -> str:
+    return f"{quote(DOCDB_DB, safe='')}/{quote(doc_id, safe='')}"
+
+
+async def _docdb_put_document(document: dict) -> bool:
+    if not DOCDB_ENABLED or not document.get("_id"):
+        return False
+
+    path = _docdb_document_path(document["_id"])
+    async with _docdb_write_lock:
+        for _ in range(3):
+            found, current = await _docdb_request("GET", path)
+            if not found and current.get("status") != 404:
+                return False
+            payload = {key: value for key, value in document.items() if key != "_rev"}
+            if found and current.get("_rev"):
+                payload["_rev"] = current["_rev"]
+            ok, result = await _docdb_request("PUT", path, payload)
+            if ok:
+                return True
+            if result.get("status") != 409:
+                _LOGGER.warning("Could not persist DocumentDB document %s", document["_id"])
+                return False
+    _LOGGER.warning("DocumentDB revision conflict for %s", document["_id"])
+    return False
+
+
+async def _docdb_delete_document(doc_id: str) -> bool:
+    path = _docdb_document_path(doc_id)
+    async with _docdb_write_lock:
+        found, current = await _docdb_request("GET", path)
+        if not found:
+            return current.get("status") == 404
+        revision = quote(str(current.get("_rev") or ""), safe="-")
+        ok, _ = await _docdb_request("DELETE", f"{path}?rev={revision}")
+        return ok
+
+
+async def _docdb_save_event(event: dict):
+    if not DOCDB_ENABLED:
+        return
+
+    path = _docdb_document_path("history:events")
+    async with _docdb_write_lock:
+        for _ in range(3):
+            found, current = await _docdb_request("GET", path)
+            if not found and current.get("status") != 404:
+                return
+            events = list(current.get("events", [])) if found else []
+            events.append(event)
+            document = {
+                "_id": "history:events",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "events": events[-MAX_PERSISTED_EVENTS:],
+            }
+            if found and current.get("_rev"):
+                document["_rev"] = current["_rev"]
+            ok, result = await _docdb_request("PUT", path, document)
+            if ok:
+                return
+            if result.get("status") != 409:
+                _LOGGER.warning("Could not persist recent OCPP event")
+                return
+
+
+async def _docdb_flush_graph_history():
+    if not DOCDB_ENABLED:
+        return
+    for doc_id in tuple(_expired_history_docs):
+        if await _docdb_delete_document(doc_id):
+            _expired_history_docs.discard(doc_id)
+
+    for key in tuple(_dirty_hourly_history):
+        bucket = _hourly_history.get(key)
+        if not bucket:
+            _dirty_hourly_history.discard(key)
+            continue
+        snapshot = dict(bucket)
+        if await _docdb_put_document({"_id": f"history:hourly:{key}", "hour": key, **snapshot}):
+            if _hourly_history.get(key) == snapshot:
+                _dirty_hourly_history.discard(key)
+
+    for key in tuple(_dirty_daily_energy_history):
+        bucket = _daily_energy_history.get(key)
+        if not bucket:
+            _dirty_daily_energy_history.discard(key)
+            continue
+        snapshot = dict(bucket)
+        if await _docdb_put_document({"_id": f"history:daily:{key}", "date": key, **snapshot}):
+            if _daily_energy_history.get(key) == snapshot:
+                _dirty_daily_energy_history.discard(key)
+
+
+async def _docdb_load_history():
+    if not DOCDB_ENABLED:
+        return
+    path = f"{quote(DOCDB_DB, safe='')}/_all_docs?include_docs=true&limit=10000"
+    ok, data = await _docdb_request("GET", path)
+    if not ok:
+        _LOGGER.warning("Could not restore persisted OCPP history")
+        return
+
+    now = datetime.now(timezone.utc)
+    hourly_cutoff = now - timedelta(hours=HISTORY_RETENTION_HOURS)
+    daily_cutoff = (now.astimezone(ENERGY_TZ) - timedelta(days=DAILY_RETENTION_DAYS)).date()
+    session_cutoff = now - timedelta(days=CHARGE_HISTORY_RETENTION_DAYS)
+    expired = []
+    restored_hourly = restored_daily = 0
+    global _last_transaction_id
+    for row in data.get("rows", []):
+        document = row.get("doc") or {}
+        doc_id = document.get("_id", row.get("id", ""))
+        if doc_id.startswith("history:hourly:"):
+            key = document.get("hour", doc_id.removeprefix("history:hourly:"))
+            try:
+                slot = datetime.fromisoformat(key.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                expired.append(doc_id)
+                continue
+            if slot < hourly_cutoff:
+                expired.append(doc_id)
+            else:
+                _hourly_history[key] = {
+                    key: document.get(key, 0.0)
+                    for key in ("sum_kw", "sum_pv_kw", "sum_grid_export_kw", "sum_grid_import_kw", "sum_load_kw", "samples")
+                }
+                restored_hourly += 1
+        elif doc_id.startswith("history:daily:"):
+            key = document.get("date", doc_id.removeprefix("history:daily:"))
+            try:
+                day = datetime.strptime(key, "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                expired.append(doc_id)
+                continue
+            if day < daily_cutoff:
+                expired.append(doc_id)
+            else:
+                _daily_energy_history[key] = {
+                    name: document.get(name, 0.0)
+                    for name in ("import_kwh", "export_kwh", "load_kwh", "net_kwh", "cost", "samples")
+                }
+                restored_daily += 1
+        elif doc_id == "history:events":
+            events = sorted(document.get("events", []), key=lambda item: item.get("time", ""))
+            _event_buffer.extend(events[-MAX_EVENTS:])
+        elif doc_id.startswith("charge:"):
+            plugged_at = _parse_utc_time(document.get("plugged_at"))
+            if plugged_at and plugged_at < session_cutoff and document.get("ended_at"):
+                expired.append(doc_id)
+                continue
+            _charge_sessions[doc_id] = document
+            try:
+                _last_transaction_id = max(
+                    _last_transaction_id, int(document.get("transaction_id") or 0)
+                )
+            except (TypeError, ValueError):
+                pass
+            if not document.get("ended_at"):
+                open_monitoring_gap(document, now, "bridge_restarted")
+                key = _charge_session_key(
+                    document.get("charge_point_id"), document.get("connector_id")
+                )
+                _active_charge_sessions[key] = doc_id
+                await _persist_charge_session(document)
+
+    for doc_id in expired:
+        await _docdb_delete_document(doc_id)
+    _LOGGER.info("Restored OCPP graph history: %d hourly and %d daily buckets", restored_hourly, restored_daily)
 
 
 async def _docdb_ensure_db():
@@ -1591,6 +2048,7 @@ async def main():
     # Initialize DocumentDB
     if DOCDB_ENABLED:
         await _docdb_ensure_db()
+        await _docdb_load_history()
         await _docdb_load_schedules()
 
     # Start Solar Smart background loop

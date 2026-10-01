@@ -512,13 +512,45 @@ export default function App() {
               </div>
               <div className="card-body">
                 <div className="table-wrap"><table className="data-table">
-                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th>Energy</th><th>Last Update</th></tr></thead>
+                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th>Energy</th><th>SoC</th><th>Last Update</th></tr></thead>
                   <tbody>
                     {Object.entries(selectedCp.physical_status || {}).map(([connId, status]) => {
                       const mv = (selectedCp.meter_values || {})[connId] || {};
-                      return (<tr key={connId}><td>Connector {connId}</td><td><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td>{mv.power != null ? Math.round(mv.power) + 'W' : '—'}</td><td>{mv.energy != null ? (mv.energy / 1000).toFixed(1) + 'kWh' : '—'}</td><td className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
+                      return (<tr key={connId}><td>Connector {connId}</td><td><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td>{mv.power != null ? Math.round(mv.power) + 'W' : '—'}</td><td>{mv.energy != null ? (mv.energy / 1000).toFixed(1) + 'kWh' : '—'}</td><td>{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported'}</td><td className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
                     })}
-                    {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr><td colSpan={5} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
+                    {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
+                  </tbody>
+                </table></div>
+              </div>
+            </div>
+          )}
+
+          {selectedCp && (
+            <div className="card">
+              <div className="card-header">
+                <h3>Charge History: {selectedCp.id}</h3>
+                <span className="text-secondary" style={{fontSize: 12}}>Recent sessions</span>
+              </div>
+              <div className="card-body">
+                <div className="table-wrap"><table className="data-table">
+                  <thead><tr><th>Started</th><th>State</th><th>Energy Delivered</th><th>SoC</th><th>Health</th><th>Events</th></tr></thead>
+                  <tbody>
+                    {(selectedCp.recent_charge_sessions || []).map((session) => {
+                      const soc = session.soc_end_percent ?? session.soc_start_percent;
+                      const healthClass = session.health === 'ok' ? 'badge-on' : session.health === 'faulted' ? 'badge-off' : 'badge-warn';
+                      const eventCount = (session.faults || []).length + (session.monitoring_gaps || []).length;
+                      return (
+                        <tr key={session.session_id}>
+                          <td className="date-cell">{session.plugged_at ? new Date(session.plugged_at).toLocaleString() : '—'}</td>
+                          <td><span className={'badge ' + (session.state === 'charging' ? 'badge-on' : 'badge-neutral')}>{session.state || 'unknown'}</span></td>
+                          <td>{session.energy_delivered_wh != null ? (session.energy_delivered_wh / 1000).toFixed(3) + ' kWh' : '—'}</td>
+                          <td>{soc != null ? soc + '%' : 'Not reported'}</td>
+                          <td><span className={'badge ' + healthClass}>{session.health || 'unknown'}</span></td>
+                          <td>{eventCount ? `${(session.faults || []).length} faults, ${(session.monitoring_gaps || []).length} gaps` : 'None'}</td>
+                        </tr>
+                      );
+                    })}
+                    {(selectedCp.recent_charge_sessions || []).length === 0 && <tr><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No charge sessions recorded</td></tr>}
                   </tbody>
                 </table></div>
               </div>

@@ -1,6 +1,13 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
-from src.charge_history import add_energy_delta, parse_meter_values
+from src.charge_history import (
+    add_energy_delta,
+    close_monitoring_gap,
+    open_monitoring_gap,
+    parse_meter_values,
+    record_session_meter,
+)
 
 
 class ChargeHistoryTests(unittest.TestCase):
@@ -38,6 +45,46 @@ class ChargeHistoryTests(unittest.TestCase):
         self.assertEqual(state["meter_resets"], 1)
         self.assertEqual(add_energy_delta(state, 100), 75)
         self.assertEqual(state["energy_delivered_wh"], 575)
+
+    def test_session_meter_tracks_totals_and_bounds_cadenced_samples(self):
+        session = {"samples": []}
+        start = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+        self.assertTrue(record_session_meter(session, {
+            "energy_wh": 1000, "soc_percent": 40, "power_w": 3500,
+        }, start, 60, 1))
+        self.assertFalse(record_session_meter(session, {
+            "energy_wh": 1010, "soc_percent": 41, "power_w": 3600,
+        }, start + timedelta(seconds=30), 60, 1))
+        self.assertEqual(session["energy_delivered_wh"], 10)
+        self.assertEqual(session["soc_end_percent"], 41)
+        self.assertEqual(len(session["samples"]), 1)
+
+        self.assertTrue(record_session_meter(session, {
+            "energy_wh": 1025, "soc_percent": 42, "power_w": 3700,
+        }, start + timedelta(seconds=60), 60, 1))
+        self.assertEqual(session["energy_delivered_wh"], 25)
+        self.assertEqual(session["soc_start_percent"], 40)
+        self.assertEqual(session["soc_max_percent"], 42)
+        self.assertEqual(len(session["samples"]), 1)
+        self.assertEqual(session["samples"][0]["energy_wh"], 1025)
+
+    def test_monitoring_gap_is_deduplicated_and_closed_on_recovery(self):
+        session = {"health": "ok", "faults": []}
+        disconnected_at = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+        self.assertTrue(open_monitoring_gap(session, disconnected_at, "disconnected"))
+        self.assertFalse(open_monitoring_gap(
+            session, disconnected_at + timedelta(seconds=5), "restarted"
+        ))
+        self.assertEqual(len(session["monitoring_gaps"]), 1)
+        self.assertEqual(session["health"], "monitoring_gap")
+
+        recovered_at = disconnected_at + timedelta(minutes=2)
+        self.assertTrue(close_monitoring_gap(session, recovered_at))
+        self.assertEqual(session["monitoring_gaps"][0]["ended_at"], recovered_at.isoformat())
+        self.assertEqual(session["health"], "ok")
+        self.assertFalse(close_monitoring_gap(session, recovered_at))
 
 
 if __name__ == "__main__":
