@@ -1728,6 +1728,7 @@ async def handle_schedule_post(request):
             return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
 
         config = _get_schedule(cp_id)
+        previous_mode = config.get("mode", "charge_now")
         config["mode"] = mode
 
         # Update timezone if provided
@@ -1893,10 +1894,16 @@ async def handle_schedule_post(request):
                     ),
                 ))
             conn1_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1", "")
-            if (not call_warnings) and conn1_status in ("Available", "Preparing"):
-                await safe_cp_call("RemoteStartTransaction", RemoteStartTransaction(
+            should_start = previous_mode == "stop" or conn1_status in ("Available", "Preparing")
+            if (not call_warnings) and should_start:
+                start_result = await safe_cp_call("RemoteStartTransaction", RemoteStartTransaction(
                     id_tag="0000003934", connector_id=1,
                 ))
+                start_status = getattr(start_result, "status", "unknown")
+                _record_event(cp_id, "remote_start", f"status={start_status}", {
+                    "status": start_status,
+                    "source": "charge_now",
+                })
             _record_event(cp_id, "schedule", "Mode: CHARGE NOW")
 
         # Persist to DocumentDB
