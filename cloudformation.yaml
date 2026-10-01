@@ -40,8 +40,11 @@ Parameters:
     Default: '9094'
   DOCDB_URL:
     Type: String
-    Default: http://docdb-ocpp-mqtt-db:5984
+    Default: http://ocpp-mqtt-docdb-proxy:5984
     Description: CouchDB endpoint for schedule persistence
+  DOCDB_REDIS_DB:
+    Type: String
+    Default: "3"
   DOCDB_USER:
     Type: String
     Default: admin
@@ -53,9 +56,6 @@ Parameters:
     Type: String
     Default: ocpp_mqtt
     Description: Dedicated OCPP DocumentDB database name
-  DocDBPort:
-    Type: String
-    Default: "5984"
   ESY_THING_NAME:
     Type: String
     Default: gormantec-battery1
@@ -66,40 +66,65 @@ Resources:
     Properties:
       Name: DOCDB_PASSWORD
       Description: DocumentDB master password (from SECRET_DOCDB_PASSWORD)
-  DocDBSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  OcppDocDBProxyRole:
+    Type: AWS::IAM::Role
     Properties:
-      GroupDescription: Allow CouchDB HTTP access from ECS tasks
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: !Ref DocDBPort
-          ToPort: !Ref DocDBPort
-          CidrIp: 0.0.0.0/0
-  DocDBSubnetGroup:
-    Type: AWS::DocDB::DBSubnetGroup
+      RoleName: ocpp-mqtt-docdb-proxy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      RedisAccess:
+        Database: 3
+        KeyPatterns:
+          - "ocpp_mqtt:*"
+          - "db:ocpp_mqtt"
+  OcppDocDBProxyTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      IoTCoreLite:
+        SecretsGroup: gormantec.com
     Properties:
-      DBSubnetGroupDescription: Subnets for OCPP DocumentDB
-      SubnetIds:
-        - subnet-default
-  OcppDocDBCluster:
-    Type: AWS::DocDB::DBCluster
+      Family: ocpp-mqtt-docdb-proxy-acl
+      Cpu: "128"
+      Memory: "128"
+      NetworkMode: bridge
+      TaskRoleArn: !GetAtt OcppDocDBProxyRole.Arn
+      ContainerDefinitions:
+        - Name: docdb-proxy
+          Image: ghcr.io/gormantec/docker-documentdb:proxy
+          PortMappings:
+            - ContainerPort: "5984"
+          Environment:
+            - Name: DOCDB_REDIS_HOST
+              Value: 192.168.8.14
+            - Name: DOCDB_REDIS_PORT
+              Value: "6379"
+            - Name: DOCDB_REDIS_DB
+              Value:
+                Ref: DOCDB_REDIS_DB
+            - Name: DOCDB_HTTP_USER
+              Value:
+                Ref: DOCDB_USER
+            - Name: DOCDB_HTTP_PASSWORD
+              Value:
+                Ref: DOCDB_PASSWORD
+            - Name: DOCDB_STUB_PORT
+              Value: "0"
+      _restartPolicy: unless-stopped
+  OcppDocDBProxyService:
+    Type: AWS::ECS::Service
+    DependsOn: OcppDocDBProxyTaskDefinition
     Properties:
-      DBClusterIdentifier: ocpp-mqtt-db
-      Engine: docdb
-      MasterUsername:
-        Ref: DOCDB_USER
-      MasterUserPassword:
-        Ref: DOCDB_PASSWORD
-      Port: !Ref DocDBPort
-      DBSubnetGroupName: !Ref DocDBSubnetGroup
-      VpcSecurityGroupIds:
-        - !Ref DocDBSecurityGroup
-  OcppDocDBInstance:
-    Type: AWS::DocDB::DBInstance
-    Properties:
-      DBClusterIdentifier: !Ref OcppDocDBCluster
-      DBInstanceClass: db.t3.medium
-      DBInstanceIdentifier: ocpp-mqtt-db-1
+      ServiceName: ocpp-mqtt-docdb-proxy
+      TaskDefinition: !Ref OcppDocDBProxyTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkAlias: ocpp-mqtt-docdb-proxy
+      InternalOnly: true
   OcppMqttLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -111,13 +136,13 @@ Resources:
       IoTCoreLite:
         _injectFromCompose: true
     Properties:
-      Family: ocpp-mqtt
+      Family: ocpp-mqtt-redis
       Cpu: "256"
       Memory: "512"
       NetworkMode: bridge
       ContainerDefinitions:
         - Name: ocpp-mqtt
-          Image: PLACEHOLDER
+          Image: ghcr.io/gormantec/docker-ocpp-mqtt:latest
           PortMappings:
             - ContainerPort: "9000"
             - ContainerPort: "9094"
@@ -173,6 +198,7 @@ Resources:
       _restartPolicy: unless-stopped
   OcppMqttService:
     Type: AWS::ECS::Service
+    DependsOn: OcppDocDBProxyService
     Properties:
       ServiceName: ocpp-mqtt
       TaskDefinition: !Ref OcppMqttTaskDefinition
@@ -182,12 +208,13 @@ Resources:
       # any manager node rather than a specific hostname.
       PlacementConstraints:
         - Type: distinctInstance
-          Expression: node.role == manager
+          Expression: node.hostname == docker-two
       DeploymentConfiguration:
         DeploymentCircuitBreaker:
           Enable: true
           Rollback: true
       NetworkAlias: ecs-ocpp-mqtt
+      InternalOnly: false
   OcppMqttWebapp:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
@@ -203,11 +230,9 @@ Outputs:
     Description: CloudWatch Log Group for container logs
     Value: /ecs/ocpp-mqtt
   DocDBEndpoint:
-    Description: DocumentDB (CouchDB) connection URL
-    Value: OcppDocDBCluster.Endpoint
-  DocDBClusterId:
-    Description: DocumentDB cluster identifier
-    Value: !Ref OcppDocDBCluster
+    Description: Redis-backed DocumentDB-compatible proxy URL
+    Value:
+      Ref: DOCDB_URL
   DocDBPasswordSecretArn:
     Description: ARN of the DOCDB_PASSWORD secret
     Value: !Ref DocDBPasswordSecret
