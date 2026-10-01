@@ -106,6 +106,10 @@ const formatReadingAge = (timestamp) => {
   return `${Math.floor(elapsedSeconds / 60)}m ago`;
 };
 
+const formatPower = (watts) => watts > 500
+  ? `${(watts / 1000).toFixed(2)}kW`
+  : `${Math.round(watts)}W`;
+
 const STATUS_COLORS = {
   Available: '#0A7D4C', Preparing: '#FF9900', Charging: '#0073BB',
   SuspendedEVSE: '#545B64', SuspendedEV: '#545B64', Finishing: '#FF9900',
@@ -358,7 +362,7 @@ export default function App() {
         {data && (<>
           <div className="summary-cards">
             <div className="summary-card">
-              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 ? ' text-green' : '')}>{powerSummary.watts != null ? Math.round(totalPower) + 'W' : '—'}</div>
+              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 ? ' text-green' : '')}>{powerSummary.watts != null ? formatPower(totalPower) : '—'}</div>
               <div className="summary-label">
                 Charging Power
                 {powerSummary.fromHistory && powerSummary.lastReportedAt && <span style={{display: 'block', fontSize: 11}}>Last charger report {formatReadingAge(powerSummary.lastReportedAt)}</span>}
@@ -555,11 +559,11 @@ export default function App() {
               </div>
               <div className="card-body">
                 <div className="table-wrap"><table className="data-table">
-                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th>Energy</th><th>SoC</th><th>Last Update</th></tr></thead>
+                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th title="Cumulative energy imported on the charger's meter register; spans sessions and may reset if the meter is reset.">Cumulative Import</th><th>SoC</th><th>Last Update</th></tr></thead>
                   <tbody>
                     {Object.entries(selectedCp.physical_status || {}).map(([connId, status]) => {
                       const mv = (selectedCp.meter_values || {})[connId] || {};
-                      return (<tr key={connId}><td>Connector {connId}</td><td><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td>{mv.power != null ? Math.round(mv.power) + 'W' : '—'}</td><td>{mv.energy != null ? (mv.energy / 1000).toFixed(1) + 'kWh' : '—'}</td><td>{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported'}</td><td className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
+                      return (<tr key={connId}><td>Connector {connId}</td><td><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td>{mv.power != null ? formatPower(mv.power) : '—'}</td><td>{mv.energy != null ? (mv.energy / 1000).toFixed(1) + ' kWh' : '—'}</td><td>{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported'}</td><td className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
                     })}
                     {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
                   </tbody>

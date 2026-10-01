@@ -1195,6 +1195,7 @@ _solar_metrics = {
 # Solar Smart per-CP throttle state
 # {cp_id: {"throttled_watts": float, "direction": "down"|"up"|None, "consecutive": int}}
 _solar_throttle: dict[str, dict] = {}
+_auto_off_peak_start_attempts: dict[str, str] = {}
 
 # ESY sunhomes MQTT thing name (must match cloudformation)
 ESY_THING_NAME = _env_str("ESY_THING_NAME", "gormantec-battery1")
@@ -1585,6 +1586,61 @@ def _is_off_peak(cp_id: str) -> bool:
         return hour >= start or hour < end
 
 
+def _off_peak_window_key(cp_id: str, now=None):
+    config = _get_schedule(cp_id)
+    tz = _get_tz(cp_id)
+    now = (now or datetime.now(tz)).astimezone(tz)
+    start = config.get("off_peak_start_hour", 0)
+    end = config.get("off_peak_end_hour", 6)
+    if start == end:
+        return None
+
+    if start < end:
+        if not start <= now.hour < end:
+            return None
+        window_date = now.date()
+    elif now.hour >= start:
+        window_date = now.date()
+    elif now.hour < end:
+        window_date = now.date() - timedelta(days=1)
+    else:
+        return None
+
+    return f"{window_date.isoformat()}:{start:02d}-{end:02d}"
+
+
+async def _try_auto_off_peak_start(cp_id: str, cp, window_key: str):
+    if _auto_off_peak_start_attempts.get(cp_id) == window_key:
+        return
+
+    connector_status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1")
+    session = _find_active_charge_session(cp_id)
+    if connector_status != "SuspendedEV":
+        return
+    if cp_id in _tx_ids or (session and session.get("transaction_id") is not None):
+        return
+
+    _auto_off_peak_start_attempts[cp_id] = window_key
+    try:
+        result = await cp.call(RemoteStartTransaction(
+            id_tag="0000003934", connector_id=1,
+        ))
+        status = getattr(result, "status", str(result))
+        _record_event(cp_id, "remote_start", f"status={status}", {
+            "status": status,
+            "source": "auto_off_peak",
+            "window": window_key,
+        })
+        _LOGGER.info("AUTO off-peak RemoteStartTransaction for %s: %s", cp_id, status)
+    except Exception as e:
+        _record_event(cp_id, "remote_start", f"status=error: {e}", {
+            "status": "error",
+            "source": "auto_off_peak",
+            "window": window_key,
+        })
+        _LOGGER.warning("AUTO off-peak RemoteStartTransaction failed for %s: %s", cp_id, e)
+
+
 async def _apply_throttled_watts(cp_id: str, watts: float):
     """Send SetChargingProfile with a throttled watt limit."""
     cp = _active_cps.get(cp_id)
@@ -1619,10 +1675,16 @@ async def _solar_smart_tick():
     for cp_id, config in list(_schedule_configs.items()):
         mode = config.get("mode", "charge_now")
         solar_smart = config.get("solar_smart", False)
-        if mode != "auto" or not solar_smart:
+        if mode != "auto":
             continue
         cp = _active_cps.get(cp_id)
         if not cp:
+            continue
+
+        window_key = _off_peak_window_key(cp_id)
+        if window_key:
+            await _try_auto_off_peak_start(cp_id, cp, window_key)
+        if not solar_smart:
             continue
 
         # Off-peak window: reset to configured period rate, no throttling
@@ -1730,6 +1792,8 @@ async def handle_schedule_post(request):
         config = _get_schedule(cp_id)
         previous_mode = config.get("mode", "charge_now")
         config["mode"] = mode
+        if mode != "auto":
+            _auto_off_peak_start_attempts.pop(cp_id, None)
 
         # Update timezone if provided
         if "timezone" in body:
