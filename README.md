@@ -143,6 +143,13 @@ The OCPP bridge and the X1 controller both evaluate the same decision tree. The 
 | **Grid Export** | ESY Sunhomes MQTT telemetry (`gridExport`) |
 | **Battery SOC** | ESY Sunhomes MQTT telemetry (`batterySoc`) |
 | **Power Distribution** | Bar chart: PV, Grid Out, Grid In, Charging (total) |
+| **Charge History** | Persisted charger sessions with meter-derived energy, optional vehicle SoC, faults, and monitoring gaps |
+
+### Durable OCPP History
+
+Set `DOCDB_URL` to enable persistence of hourly graph buckets, daily energy history, recent OCPP events, and charge sessions. Open sessions are restored as interrupted after a bridge restart and remain active until charger status or transaction events resolve them. Completed charge sessions are retained for 90 days by default.
+
+Session energy is calculated from changes in the charger's cumulative import meter. It is not a measurement of energy stored in the vehicle. Vehicle SoC is recorded only when the charger reports the OCPP `SoC` measurand; otherwise the UI shows **Not reported**. Transport disconnects are recorded as monitoring gaps, not as proof that the vehicle was unplugged.
 
 ## Configuration
 
@@ -156,6 +163,15 @@ All settings via environment variables:
 | `MQTT_BROKER` | `docker-iot_server` | MQTT broker hostname |
 | `MQTT_PORT` | `8883` | MQTT broker port |
 | `MQTT_THING_NAME` | `gormantec-ocpp-bridge` | MQTT client identifier |
+| `DOCDB_URL` | unset | CouchDB-compatible DocumentDB URL; enables durable history |
+| `DOCDB_USER` | `admin` | DocumentDB username |
+| `DOCDB_PASSWORD` | `password` | DocumentDB password |
+| `DOCDB_DB` | `ocpp_mqtt` | DocumentDB database name |
+| `CHARGE_HISTORY_RETENTION_DAYS` | `90` | Retention for completed charge sessions |
+| `METER_HISTORY_SAMPLE_SECONDS` | `60` | Minimum interval between persisted session meter samples |
+| `MAX_SESSION_SAMPLES` | `720` | Maximum meter samples retained per charge session |
+| `HISTORY_RETENTION_HOURS` | `192` | Retention for hourly graph buckets |
+| `DAILY_RETENTION_DAYS` | `120` | Retention for daily energy buckets |
 
 ## Building
 

@@ -79,6 +79,7 @@ class ChargeHistoryTests(unittest.TestCase):
         ))
         self.assertEqual(len(session["monitoring_gaps"]), 1)
         self.assertEqual(session["health"], "monitoring_gap")
+        self.assertEqual(session["last_event_at"], disconnected_at.isoformat())
 
         recovered_at = disconnected_at + timedelta(minutes=2)
         self.assertTrue(close_monitoring_gap(session, recovered_at))

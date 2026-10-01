@@ -139,6 +139,7 @@ def open_monitoring_gap(session, started_at, reason):
         return False
     gaps.append({"started_at": started_at.isoformat(), "reason": reason})
     session["health"] = "monitoring_gap"
+    session["last_event_at"] = started_at.isoformat()
     return True
 
 
