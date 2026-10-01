@@ -700,6 +700,7 @@ class MqttChargePoint(BaseChargePoint):
                                     timestamp=None, reservation_id=None, **kwargs):
         received_at = datetime.now(timezone.utc)
         transaction_id = _allocate_transaction_id()
+        _tx_ids[self.id] = transaction_id
         _LOGGER.info("StartTransaction from %s: connector=%s meter_start=%s",
                      self.id, connector_id, meter_start)
         event = _record_event(self.id, "start_transaction", f"meter_start={meter_start}", {
@@ -752,6 +753,8 @@ class MqttChargePoint(BaseChargePoint):
         session = _find_active_charge_session(self.id, transaction_id)
         if session is None:
             session = _find_active_charge_session(self.id)
+        if _tx_ids.get(self.id) == transaction_id:
+            _tx_ids.pop(self.id, None)
         if session and transaction_data:
             for sample in parse_meter_values(transaction_data):
                 record_session_meter(

@@ -40,6 +40,12 @@ class ChargeHistoryTests(unittest.TestCase):
         values = parse_meter_values([{
             "timestamp": "2026-10-02T00:00:00Z",
             "sampled_value": [
+                {"value": "237.8", "measurand": "Voltage", "unit": "V", "phase": "L1"},
+                {"value": "238.8", "measurand": "Voltage", "unit": "V", "phase": "L2"},
+                {"value": "238.7", "measurand": "Voltage", "unit": "V", "phase": "L3"},
+                {"value": "6.44", "measurand": "Current.Import", "unit": "A", "phase": "L1"},
+                {"value": "0.00", "measurand": "Current.Import", "unit": "A", "phase": "L2"},
+                {"value": "0.00", "measurand": "Current.Import", "unit": "A", "phase": "L3"},
                 {"value": "1531", "measurand": "Power.Active.Import", "unit": "W"},
                 {"value": "2491880", "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
             ],
@@ -47,6 +53,14 @@ class ChargeHistoryTests(unittest.TestCase):
 
         self.assertEqual(values[0]["power_w"], 1531)
         self.assertEqual(values[0]["energy_wh"], 2491880)
+        self.assertEqual(values[0]["current_a"], 6.44)
+        self.assertAlmostEqual(values[0]["voltage_v"], 238.4333, places=4)
+
+        session = {"last_energy_wh": 2491820, "energy_delivered_wh": 0, "samples": []}
+        recorded_at = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        self.assertTrue(record_session_meter(session, values[0], recorded_at, 60, 10))
+        self.assertEqual(session["energy_delivered_wh"], 60)
+        self.assertEqual(session["samples"][0]["power_w"], 1531)
 
     def test_cumulative_energy_delta_handles_meter_reset(self):
         state = {"last_energy_wh": 1000, "energy_delivered_wh": 0}
