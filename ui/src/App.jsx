@@ -164,6 +164,11 @@ export default function App() {
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
   const totalPower = sumChargePointWatts(chargePoints);
+  const hasChargingPowerReading = chargePoints.some(cp =>
+    Object.entries(cp?.meter_values || {}).some(([key, meter]) =>
+      key !== '0' && typeof meter?.power === 'number' && Number.isFinite(meter.power)
+    )
+  );
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
     [data?.hourly_history?.samples],
@@ -318,7 +323,7 @@ export default function App() {
         {data && (<>
           <div className="summary-cards">
             <div className="summary-card">
-              <div className={'summary-value' + (totalPower > 0 ? ' text-green' : '')}>{totalPower > 0 ? Math.round(totalPower) + 'W' : '0W'}</div>
+              <div className={'summary-value' + (hasChargingPowerReading && totalPower > 0 ? ' text-green' : '')}>{hasChargingPowerReading ? Math.round(totalPower) + 'W' : '—'}</div>
               <div className="summary-label">Charging Power</div>
             </div>
             <div className="summary-card">
@@ -543,7 +548,7 @@ export default function App() {
                         <tr key={session.session_id}>
                           <td className="date-cell">{session.plugged_at ? new Date(session.plugged_at).toLocaleString() : '—'}</td>
                           <td><span className={'badge ' + (session.state === 'charging' ? 'badge-on' : 'badge-neutral')}>{session.state || 'unknown'}</span></td>
-                          <td>{session.energy_delivered_wh != null ? (session.energy_delivered_wh / 1000).toFixed(3) + ' kWh' : '—'}</td>
+                          <td>{session.meter_start_wh != null && session.last_energy_wh != null ? (session.energy_delivered_wh / 1000).toFixed(3) + ' kWh' : '—'}</td>
                           <td>{soc != null ? soc + '%' : 'Not reported'}</td>
                           <td><span className={'badge ' + healthClass}>{session.health || 'unknown'}</span></td>
                           <td>{eventCount ? `${(session.faults || []).length} faults, ${(session.monitoring_gaps || []).length} gaps` : 'None'}</td>
