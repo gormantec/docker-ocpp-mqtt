@@ -66,6 +66,8 @@ from charge_history import (
 
 logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
+METER_VALUE_SAMPLE_INTERVAL = 15
+METER_VALUES_SAMPLED_DATA = "Power.Active.Import,Energy.Active.Import.Register,Current.Import,Voltage"
 
 # Charger Basic auth password
 AUTH_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
@@ -579,6 +581,49 @@ class MqttChargePoint(BaseChargePoint):
             status=RegistrationStatus.accepted,
         )
 
+    async def _configure_meter_reporting(self):
+        await asyncio.sleep(2)
+        if _active_cps.get(self.id) is not self:
+            return
+
+        keys = ["MeterValueSampleInterval", "MeterValuesSampledData"]
+        try:
+            result = await self.call(GetConfiguration(key=keys))
+        except Exception as e:
+            _LOGGER.warning("Could not read meter reporting configuration for %s: %s", self.id, e)
+            result = None
+
+        if result is not None:
+            configuration_keys = getattr(result, "configuration_key", []) or []
+            supported = {
+                item.get("key") if isinstance(item, dict) else getattr(item, "key", None)
+                for item in configuration_keys
+            }
+            for key, value in (
+                ("MeterValueSampleInterval", str(METER_VALUE_SAMPLE_INTERVAL)),
+                ("MeterValuesSampledData", METER_VALUES_SAMPLED_DATA),
+            ):
+                if key not in supported:
+                    _LOGGER.info("Charge point %s does not advertise %s", self.id, key)
+                    continue
+                try:
+                    change_result = await self.call(ChangeConfiguration(key=key, value=value))
+                    status = getattr(change_result, "status", "Unknown")
+                    _LOGGER.info("Meter reporting configuration for %s: %s=%s status=%s",
+                                 self.id, key, value, status)
+                except Exception as e:
+                    _LOGGER.warning("Could not set %s for %s: %s", key, self.id, e)
+
+        try:
+            trigger_result = await self.call(TriggerMessage(
+                requested_message="MeterValues",
+                connector_id=1,
+            ))
+            _LOGGER.info("Initial MeterValues trigger for %s: %s",
+                         self.id, getattr(trigger_result, "status", "Unknown"))
+        except Exception as e:
+            _LOGGER.warning("Could not trigger initial MeterValues for %s: %s", self.id, e)
+
     @on("Heartbeat")
     async def on_heartbeat(self, **kwargs):
         _LOGGER.debug("Heartbeat from %s", self.id)
@@ -946,6 +991,7 @@ async def ocpp_ws_handler(request: web.Request):
     cp = MqttChargePoint(cp_id, adapted)
     _active_cps[cp_id] = cp
     await _mark_charge_point_reconnected(cp_id, datetime.now(timezone.utc))
+    asyncio.create_task(cp._configure_meter_reporting())
 
     try:
         await cp.start()
