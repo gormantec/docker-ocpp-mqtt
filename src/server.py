@@ -517,7 +517,14 @@ def _charge_session_summary(session):
         "monitoring_gaps", "last_event_at", "last_history_sample_at",
     )
     result = {field: session.get(field) for field in fields}
-    result["sample_count"] = len(session.get("samples", []))
+    samples = session.get("samples", [])
+    result["sample_count"] = len(samples)
+    if samples:
+        sample = samples[-1]
+        result["last_sample"] = {
+            key: sample.get(key)
+            for key in ("received_at", "power_w", "energy_wh", "soc_percent")
+        }
     return result
 
 

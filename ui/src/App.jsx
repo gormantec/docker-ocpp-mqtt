@@ -58,14 +58,53 @@ const buildDailyUsageSeries = (daily) => {
   });
 };
 
-const sumChargePointWatts = (chargePoints) => chargePoints.reduce((sum, cp) => {
-  const mv = cp?.meter_values || {};
-  for (const key of Object.keys(mv)) {
-    if (key === '0') continue;
-    if (typeof mv[key]?.power === 'number') sum += mv[key].power;
+const summarizeChargePower = (chargePoints) => {
+  const readings = [];
+
+  for (const cp of chargePoints) {
+    const meterValues = cp?.meter_values || {};
+    const sessions = cp?.recent_charge_sessions || [];
+    const connectorIds = new Set([
+      ...Object.keys(meterValues).filter((key) => key !== '0'),
+      ...sessions
+        .filter((session) => !session.ended_at && ['charging', 'suspended', 'finishing'].includes(session.state))
+        .map((session) => String(session.connector_id)),
+    ]);
+
+    for (const connectorId of connectorIds) {
+      const live = meterValues[connectorId];
+      const session = sessions.find((item) =>
+        String(item.connector_id) === connectorId && !item.ended_at
+        && ['charging', 'suspended', 'finishing'].includes(item.state)
+      );
+      const sample = session?.last_sample;
+      const livePowerAvailable = Number.isFinite(live?.power);
+      const power = livePowerAvailable ? live.power : sample?.power_w;
+      if (!Number.isFinite(power)) continue;
+
+      readings.push({
+        power,
+        receivedAt: livePowerAvailable
+          ? live.received_at || live.timestamp
+          : sample.received_at,
+        fromHistory: !livePowerAvailable,
+      });
+    }
   }
-  return sum;
-}, 0);
+
+  return {
+    watts: readings.length ? readings.reduce((sum, reading) => sum + reading.power, 0) : null,
+    lastReportedAt: readings.map((reading) => reading.receivedAt).filter(Boolean).sort()[0] || null,
+    fromHistory: readings.some((reading) => reading.fromHistory),
+  };
+};
+
+const formatReadingAge = (timestamp) => {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000));
+  if (!Number.isFinite(elapsedSeconds)) return new Date(timestamp).toLocaleTimeString();
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
+  return `${Math.floor(elapsedSeconds / 60)}m ago`;
+};
 
 const STATUS_COLORS = {
   Available: '#0A7D4C', Preparing: '#FF9900', Charging: '#0073BB',
@@ -163,12 +202,8 @@ export default function App() {
   const effectiveCpId = selectedCpId || (connectedCps[0]?.id) || (chargePoints[0]?.id) || null;
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
-  const totalPower = sumChargePointWatts(chargePoints);
-  const hasChargingPowerReading = chargePoints.some(cp =>
-    Object.entries(cp?.meter_values || {}).some(([key, meter]) =>
-      key !== '0' && typeof meter?.power === 'number' && Number.isFinite(meter.power)
-    )
-  );
+  const powerSummary = summarizeChargePower(chargePoints);
+  const totalPower = powerSummary.watts || 0;
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
     [data?.hourly_history?.samples],
@@ -323,8 +358,11 @@ export default function App() {
         {data && (<>
           <div className="summary-cards">
             <div className="summary-card">
-              <div className={'summary-value' + (hasChargingPowerReading && totalPower > 0 ? ' text-green' : '')}>{hasChargingPowerReading ? Math.round(totalPower) + 'W' : '—'}</div>
-              <div className="summary-label">Charging Power</div>
+              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 ? ' text-green' : '')}>{powerSummary.watts != null ? Math.round(totalPower) + 'W' : '—'}</div>
+              <div className="summary-label">
+                Charging Power
+                {powerSummary.fromHistory && powerSummary.lastReportedAt && <span style={{display: 'block', fontSize: 11}}>Last charger report {formatReadingAge(powerSummary.lastReportedAt)}</span>}
+              </div>
             </div>
             <div className="summary-card">
               <div className={'summary-value' + (solar.grid_export > 2000 ? ' text-green' : solar.grid_import > 0 ? ' text-red' : '')}>{solar.grid_export || 0}W</div>
