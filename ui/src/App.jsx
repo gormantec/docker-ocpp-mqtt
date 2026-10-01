@@ -7,6 +7,21 @@ import {
 const BASE = import.meta.env.BASE_URL;
 
 const GRAPH_VIEWS = ['distribution', 'hourly', 'daily60'];
+const STALE_READING_SECONDS = 90;
+const EVENT_FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'connection', label: 'Connection' },
+  { id: 'charging', label: 'Charging' },
+  { id: 'controls', label: 'Controls' },
+];
+const EVENT_GROUPS = {
+  connection: new Set(['connected', 'disconnected']),
+  charging: new Set(['authorize', 'remote_start', 'start_transaction', 'stop_transaction', 'status_notification']),
+  controls: new Set(['schedule', 'solar_throttle', 'cmd_received']),
+};
+
+const eventMatchesFilter = (event, filter) =>
+  filter === 'all' || EVENT_GROUPS[filter]?.has(event.type);
 
 const buildHourlySeries = (samples) => {
   const sampleMap = new Map();
@@ -42,18 +57,15 @@ const buildHourlySeries = (samples) => {
 };
 
 const buildDailyUsageSeries = (daily) => {
-  const avgPrice = Number(daily?.avg_price_per_kw || 0);
   return (daily?.days || []).map((entry) => {
     const date = new Date(entry.date + 'T00:00:00');
+    const samples = Number(entry.samples || 0);
     return {
       label: String(date.getDate()).padStart(2, '0') + '/' + String(date.getMonth() + 1).padStart(2, '0'),
       day: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
       usage_kwh: Number(entry.usage_kwh || 0),
-      load_kwh: Number(entry.load_kwh || 0),
-      export_kwh: Number(entry.export_kwh || 0),
-      net_kwh: Number(entry.net_kwh || 0),
-      cost: Number(entry.cost || 0),
-      avg_price_per_kw: Number(entry.avg_price_60d_per_kw ?? avgPrice),
+      cost: samples > 0 ? Number(entry.cost || 0) : null,
+      samples,
     };
   });
 };
@@ -100,15 +112,28 @@ const summarizeChargePower = (chargePoints) => {
 };
 
 const formatReadingAge = (timestamp) => {
-  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000));
-  if (!Number.isFinite(elapsedSeconds)) return new Date(timestamp).toLocaleTimeString();
+  const timestampMs = Date.parse(timestamp || '');
+  if (!Number.isFinite(timestampMs)) return 'time unknown';
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
   if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
   return `${Math.floor(elapsedSeconds / 60)}m ago`;
+};
+
+const readingIsStale = (timestamp) => {
+  const timestampMs = Date.parse(timestamp || '');
+  return !Number.isFinite(timestampMs)
+    || (Date.now() - timestampMs) / 1000 > STALE_READING_SECONDS;
 };
 
 const formatPower = (watts) => watts > 500
   ? `${(watts / 1000).toFixed(2)}kW`
   : `${Math.round(watts)}W`;
+
+const formatCurrency = (value, digits = 2) => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return '—';
+  return `${amount < 0 ? '-$' : '$'}${Math.abs(amount).toFixed(digits)}`;
+};
 
 const STATUS_COLORS = {
   Available: '#0A7D4C', Preparing: '#FF9900', Charging: '#0073BB',
@@ -166,6 +191,8 @@ export default function App() {
   const [editOverrideSolarBoostThresholdW, setEditOverrideSolarBoostThresholdW] = useState(2000);
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
+  const [eventFilter, setEventFilter] = useState('all');
+  const [showAllEvents, setShowAllEvents] = useState(false);
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 640);
   const touchStartX = useRef(null);
 
@@ -216,6 +243,11 @@ export default function App() {
     () => buildDailyUsageSeries(data?.daily_usage_60d),
     [data?.daily_usage_60d],
   );
+  const todayUsage = data?.daily_usage_60d?.days?.slice(-1)[0] || null;
+  const filteredEvents = (data?.recent_events || [])
+    .filter((event) => !effectiveCpId || event.charge_point_id === effectiveCpId)
+    .filter((event) => eventMatchesFilter(event, eventFilter));
+  const visibleEvents = showAllEvents ? filteredEvents : filteredEvents.slice(0, 8);
   const dailyTicksNarrow = useMemo(() => {
     if (!isNarrow || dailyChartData.length === 0) return undefined;
 
@@ -345,6 +377,47 @@ export default function App() {
     catch { return new Date().getHours(); }
   };
 
+  const scheduleConfig = schedule[effectiveCpId] || {};
+  const scheduleMode = scheduleConfig.mode || 'charge_now';
+  const schedulePeriods = [...(scheduleConfig.periods || DEFAULT_PERIODS)]
+    .sort((a, b) => a.start_hour - b.start_hour);
+  const currentHour = effectiveCpId ? getNow() : 0;
+  let activePeriod = null;
+  for (const period of schedulePeriods) {
+    if (period.start_hour <= currentHour) activePeriod = period;
+  }
+  const solarControl = data?.solar_control || {};
+  const solarControlState = solarControl.states?.[effectiveCpId];
+  const requestedSolarLimit = solarControlState?.target_watts ?? data?.solar_throttle?.[effectiveCpId];
+  const hasSolarLimit = requestedSolarLimit != null && Number.isFinite(Number(requestedSolarLimit));
+  const powerIsStale = powerSummary.watts != null
+    && (powerSummary.fromHistory || readingIsStale(powerSummary.lastReportedAt));
+  const solarTelemetryIsStale = readingIsStale(solar.last_update);
+
+  let powerControlReason = 'No charger power-control target is currently available.';
+  if (scheduleMode === 'stop') {
+    powerControlReason = 'STOP mode blocks charging and requests a stop for any active session.';
+  } else if (scheduleMode === 'auto' && activePeriod?.limit_watts <= 0) {
+    powerControlReason = 'The active AUTO schedule window blocks charging.';
+  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart && solarControlState?.direction === 'down') {
+    const threshold = Number(solarControl.grid_import_threshold_w);
+    powerControlReason = !solarTelemetryIsStale && Number.isFinite(threshold) && Number(solar.grid_import) > threshold
+      ? `Grid import is ${formatPower(Number(solar.grid_import))}, above ${formatPower(threshold)}; Solar Smart is reducing its requested limit.`
+      : 'Solar Smart last reported a downward limit adjustment; current conditions may have changed.';
+  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart && solarControlState?.direction === 'up') {
+    powerControlReason = 'Solar Smart is increasing its requested limit as conditions allow.';
+  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart) {
+    powerControlReason = 'Solar Smart is enabled; no limit ramp is currently reported.';
+  } else if (scheduleMode === 'auto' && activePeriod) {
+    powerControlReason = `The active AUTO window allows up to ${formatPower(activePeriod.limit_watts)}.`;
+  } else if (scheduleMode === 'charge_now') {
+    powerControlReason = 'CHARGE NOW removes the schedule limit; the charger and vehicle can still draw less.';
+  }
+
+  const observedPower = powerSummary.watts == null
+    ? 'No charger power sample is available.'
+    : `Measured output: ${formatPower(totalPower)}${powerSummary.lastReportedAt ? `, ${powerIsStale ? 'stale' : 'updated'} ${formatReadingAge(powerSummary.lastReportedAt)}` : ''}.`;
+
   return (
     <div className="app">
       <header className="aws-navbar">
@@ -360,27 +433,65 @@ export default function App() {
         {error && <div className="error-card"><h3>Connection Issue</h3><p>{error}</p><p className="hint">The bridge may be restarting - data will refresh automatically.</p></div>}
 
         {data && (<>
+          <div className={'connection-status' + (selectedCp?.connected ? ' is-connected' : ' is-disconnected')}>
+            <span className="connection-status-dot" />
+            <strong>{effectiveCpId || 'No charge point'}</strong>
+            <span>{selectedCp?.connected ? 'Connected' : 'Offline'}</span>
+            {selectedCp?.status && <span className="connection-status-state">Connector: {selectedCp.status}</span>}
+          </div>
           <div className="summary-cards">
             <div className="summary-card">
-              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 ? ' text-green' : '')}>{powerSummary.watts != null ? formatPower(totalPower) : '—'}</div>
+              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 && !powerIsStale ? ' text-green' : '')}>{powerSummary.watts != null ? formatPower(totalPower) : '—'}</div>
               <div className="summary-label">
                 Charging Power
-                {powerSummary.fromHistory && powerSummary.lastReportedAt && <span style={{display: 'block', fontSize: 11}}>Last charger report {formatReadingAge(powerSummary.lastReportedAt)}</span>}
+                <span className={'summary-subtext' + (powerIsStale ? ' is-stale' : '')}>
+                  {powerSummary.lastReportedAt
+                    ? `${powerIsStale ? 'Stale charger reading' : 'Charger report'} · ${formatReadingAge(powerSummary.lastReportedAt)}`
+                    : 'No charger meter reading'}
+                </span>
               </div>
             </div>
             <div className="summary-card">
-              <div className={'summary-value' + (solar.grid_export > 2000 ? ' text-green' : solar.grid_import > 0 ? ' text-red' : '')}>{solar.grid_export || 0}W</div>
-              <div className="summary-label">Grid Export</div>
-            </div>
-            <div className="summary-card">
-              <div className={'summary-value' + ((solar.battery_soc || 0) > 50 ? ' text-green' : ' text-warn')}>{solar.battery_soc || 0}%</div>
-              <div className="summary-label">Battery SOC</div>
+              <div className={'summary-value' + (solarTelemetryIsStale ? '' : solar.grid_import > 0 ? ' text-red' : ' text-green')}>
+                {solarTelemetryIsStale ? '—' : formatPower(solar.grid_import || 0)}
+              </div>
+              <div className="summary-label">
+                Grid Import
+                <span className={'summary-subtext' + (solarTelemetryIsStale ? ' is-stale' : '')}>
+                  {solar.last_update ? `Site meter · ${formatReadingAge(solar.last_update)}` : 'No site meter update'}
+                </span>
+              </div>
             </div>
             <div className="summary-card">
               <div className="summary-value">
-                {(() => { const schedCfg = schedule[effectiveCpId] || {}; const mode = schedCfg.mode || 'charge_now'; if (mode === 'stop') return '🛑 STOP'; if (mode === 'charge_now') return '⚡ FULL'; return '⏱ ' + (schedCfg.periods || DEFAULT_PERIODS).length + 'w'; })()}
+                {Number(todayUsage?.samples || 0) > 0 ? formatCurrency(todayUsage.cost) : '—'}
               </div>
-              <div className="summary-label">{effectiveCpId ? 'Schedule' : 'Schedule (select CP)'}</div>
+              <div className="summary-label">
+                Today Net Grid Spend
+                <span className="summary-subtext">
+                  {Number(todayUsage?.samples || 0) > 0
+                    ? `${Number(todayUsage.usage_kwh || 0).toFixed(2)} kWh imported · estimate`
+                    : 'Waiting for site meter samples'}
+                </span>
+              </div>
+            </div>
+            <div className="summary-card">
+              <div className={'summary-value' + (!solarTelemetryIsStale && solar.grid_export > 2000 ? ' text-green' : '')}>
+                {solarTelemetryIsStale ? '—' : formatPower(solar.grid_export || 0)}
+              </div>
+              <div className="summary-label">Grid Export</div>
+            </div>
+            <div className="summary-card">
+              <div className={'summary-value' + (!solarTelemetryIsStale && solar.battery_soc > 50 ? ' text-green' : !solarTelemetryIsStale && solar.battery_soc <= 50 ? ' text-warn' : '')}>
+                {solarTelemetryIsStale || solar.battery_soc == null ? '—' : `${solar.battery_soc}%`}
+              </div>
+              <div className="summary-label">Home Battery SOC</div>
+            </div>
+            <div className="summary-card">
+              <div className="summary-value">
+                {scheduleMode === 'stop' ? 'STOP' : scheduleMode === 'charge_now' ? 'FULL' : 'AUTO'}
+              </div>
+              <div className="summary-label">{effectiveCpId ? 'Charge Mode' : 'Select a charger'}</div>
             </div>
           </div>
 
@@ -437,6 +548,14 @@ export default function App() {
                 <div className="hint" style={{ fontSize: 12, color: '#95a5a6', marginTop: 8 }}>
                   <strong>STOP:</strong> block all | <strong>AUTO:</strong> time-of-day schedule | <strong>CHARGE NOW:</strong> full power
                   {(() => { const cfg = schedule[effectiveCpId] || {}; const periods = cfg.mode === 'auto' ? (cfg.periods || DEFAULT_PERIODS) : null; return periods ? ' - ' + periods.map(p => p.start_hour + ':00→' + p.limit_watts + 'W').join(', ') : ''; })()}
+                </div>
+                <div className="power-context">
+                  <strong>Why this power?</strong>
+                  <span>{powerControlReason}</span>
+                  {scheduleConfig.solar_smart && hasSolarLimit && (
+                    <span>Latest Solar Smart limit request: {formatPower(Number(requestedSolarLimit))}. This is a bridge target, not confirmation the charger accepted it.</span>
+                  )}
+                  <span>{observedPower}</span>
                 </div>
               </>)}
             </div>
@@ -495,7 +614,7 @@ export default function App() {
                         { name: 'PV', value: Math.abs(solar.pv_power || 0) },
                         { name: 'Grid Out', value: Math.abs(solar.grid_export || 0) },
                         { name: 'Grid In', value: Math.abs(solar.grid_import || 0) },
-                        { name: 'Charging', value: Math.round(totalPower) },
+                        { name: powerIsStale ? 'Charger stale' : 'Charging', value: Math.round(totalPower) },
                       ]}
                       margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
                     >
@@ -533,21 +652,34 @@ export default function App() {
                         minTickGap={isNarrow ? 18 : 8}
                       />
                       <YAxis yAxisId="usage" tick={{ fontSize: 12, fill: '#95a5a6' }} unit="kWh" />
-                        <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#D13212' }} tickFormatter={(v) => '$' + Number(v).toFixed(2)} />
+                      <YAxis yAxisId="cost" orientation="right" tick={{ fontSize: 11, fill: '#D13212' }} tickFormatter={(v) => formatCurrency(v)} />
                       <Tooltip
                         labelFormatter={(_, payload) => payload?.[0]?.payload?.day || 'Day'}
                         formatter={(value, name) => {
-                            if (name === 'Grid Usage') return [Number(value).toFixed(2) + ' kWh', 'Grid Usage'];
-                            return ['$' + Number(value).toFixed(4) + '/kWh', '60d Avg Price (Grid Spend / Load)'];
+                          if (name === 'Grid import') return [`${Number(value).toFixed(2)} kWh`, name];
+                          return [formatCurrency(value), name];
                         }}
                       />
-                        <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Grid Usage" stroke="#0073BB" strokeWidth={2} dot={false} />
-                        <Line yAxisId="price" type="linear" dataKey="avg_price_per_kw" name="60d Avg Price (Grid Spend / Load)" stroke="#D13212" strokeDasharray="6 6" strokeWidth={2} dot={false} />
+                      <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Grid import" stroke="#0073BB" strokeWidth={2} dot={false} />
+                      <Line yAxisId="cost" type="linear" dataKey="cost" name="Estimated net site cost" stroke="#D13212" strokeWidth={2} dot={false} connectNulls={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
               </div>
               {isNarrow && <div className="graph-hint">Swipe left or right on the chart to switch graphs.</div>}
+              {graphView === 'daily60' && (
+                <details className="tariff-details">
+                  <summary>Cost estimate and tariff assumptions</summary>
+                  {data.grid_tariff ? (
+                    <div className="tariff-detail-list">
+                      <span>Whole-site grid imports, less feed-in credits; not EV-only charging cost.</span>
+                      <span>Off-peak: {formatCurrency(data.grid_tariff.off_peak_rate, 4)}/kWh, {String(data.grid_tariff.off_peak_start_hour).padStart(2, '0')}:00–{String(data.grid_tariff.off_peak_end_hour).padStart(2, '0')}:00.</span>
+                      <span>General: {formatCurrency(data.grid_tariff.general_rate, 4)}/kWh plus seasonal demand adder: summer {formatCurrency(data.grid_tariff.summer_demand_rate, 4)}, other months {formatCurrency(data.grid_tariff.non_summer_demand_rate, 4)}.</span>
+                      <span>Feed-in credit: {formatCurrency(data.grid_tariff.feed_in_tariff, 4)}/kWh · {data.grid_tariff.timezone}.</span>
+                    </div>
+                  ) : <p>Tariff settings are unavailable; treat these costs as indicative only.</p>}
+                </details>
+              )}
             </div>
           </div>
 
@@ -559,13 +691,13 @@ export default function App() {
               </div>
               <div className="card-body">
                 <div className="table-wrap"><table className="data-table">
-                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th title="Cumulative energy imported on the charger's meter register; spans sessions and may reset if the meter is reset.">Cumulative Import</th><th>SoC</th><th>Last Update</th></tr></thead>
+                  <thead><tr><th>Connector</th><th>Status</th><th>Power</th><th title="Cumulative energy imported on the charger's meter register; spans sessions and may reset if the meter is reset.">Cumulative Import</th><th>Vehicle SoC</th><th>Last Update</th></tr></thead>
                   <tbody>
                     {Object.entries(selectedCp.physical_status || {}).map(([connId, status]) => {
                       const mv = (selectedCp.meter_values || {})[connId] || {};
-                      return (<tr key={connId}><td>Connector {connId}</td><td><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td>{mv.power != null ? formatPower(mv.power) : '—'}</td><td>{mv.energy != null ? (mv.energy / 1000).toFixed(1) + ' kWh' : '—'}</td><td>{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported'}</td><td className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
+                      return (<tr key={connId}><td data-label="Connector">Connector {connId}</td><td data-label="Status"><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td data-label="Power">{mv.power != null ? formatPower(mv.power) : '—'}</td><td data-label="Cumulative import">{mv.energy != null ? (mv.energy / 1000).toFixed(1) + ' kWh' : '—'}</td><td data-label="Vehicle SoC">{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported by charger'}</td><td data-label="Last update" className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
                     })}
-                    {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
+                    {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr className="empty-row"><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
                   </tbody>
                 </table></div>
               </div>
@@ -580,7 +712,7 @@ export default function App() {
               </div>
               <div className="card-body">
                 <div className="table-wrap"><table className="data-table">
-                  <thead><tr><th>Started</th><th>State</th><th>Energy Delivered</th><th>SoC</th><th>Health</th><th>Events</th></tr></thead>
+                  <thead><tr><th>Started</th><th>State</th><th>Energy Delivered</th><th>Vehicle SoC</th><th>Health</th><th>Events</th></tr></thead>
                   <tbody>
                     {(selectedCp.recent_charge_sessions || []).map((session) => {
                       const soc = session.soc_end_percent ?? session.soc_start_percent;
@@ -588,16 +720,16 @@ export default function App() {
                       const eventCount = (session.faults || []).length + (session.monitoring_gaps || []).length;
                       return (
                         <tr key={session.session_id}>
-                          <td className="date-cell">{session.plugged_at ? new Date(session.plugged_at).toLocaleString() : '—'}</td>
-                          <td><span className={'badge ' + (session.state === 'charging' ? 'badge-on' : 'badge-neutral')}>{session.state || 'unknown'}</span></td>
-                          <td>{session.meter_start_wh != null && session.last_energy_wh != null ? (session.energy_delivered_wh / 1000).toFixed(3) + ' kWh' : '—'}</td>
-                          <td>{soc != null ? soc + '%' : 'Not reported'}</td>
-                          <td><span className={'badge ' + healthClass}>{session.health || 'unknown'}</span></td>
-                          <td>{eventCount ? `${(session.faults || []).length} faults, ${(session.monitoring_gaps || []).length} gaps` : 'None'}</td>
+                          <td data-label="Started" className="date-cell">{session.plugged_at ? new Date(session.plugged_at).toLocaleString() : '—'}</td>
+                          <td data-label="State"><span className={'badge ' + (session.state === 'charging' ? 'badge-on' : 'badge-neutral')}>{session.state || 'unknown'}</span></td>
+                          <td data-label="Energy delivered">{session.meter_start_wh != null && session.last_energy_wh != null ? (session.energy_delivered_wh / 1000).toFixed(3) + ' kWh' : '—'}</td>
+                          <td data-label="Vehicle SoC">{soc != null ? soc + '%' : 'Not reported by charger'}</td>
+                          <td data-label="Session health"><span className={'badge ' + healthClass}>{session.health || 'unknown'}</span></td>
+                          <td data-label="Events">{eventCount ? `${(session.faults || []).length} faults, ${(session.monitoring_gaps || []).length} gaps` : 'None'}</td>
                         </tr>
                       );
                     })}
-                    {(selectedCp.recent_charge_sessions || []).length === 0 && <tr><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No charge sessions recorded</td></tr>}
+                    {(selectedCp.recent_charge_sessions || []).length === 0 && <tr className="empty-row"><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No charge sessions recorded</td></tr>}
                   </tbody>
                 </table></div>
               </div>
@@ -639,14 +771,35 @@ export default function App() {
 
           {/* Recent Events */}
           <div className="card">
-            <div className="card-header"><h3>Recent Events</h3><span className="text-secondary" style={{fontSize: 12}}>{effectiveCpId ? 'Filtered: ' + effectiveCpId : 'All charge points'}</span></div>
-            <div className="card-body" style={{ maxHeight: 280, overflowY: 'auto' }}>
-              {(!data.recent_events || data.recent_events.length === 0) ? <div className="empty-state"><p>No events yet. Waiting for charge point activity...</p></div>
-               : (<div className="table-wrap"><table className="data-table"><thead><tr><th>Time</th><th>Charge Point</th><th>Event</th><th>Details</th></tr></thead><tbody>
-                {data.recent_events.filter(ev => !effectiveCpId || ev.charge_point_id === effectiveCpId).map((ev, i) => (
-                  <tr key={i}><td className="date-cell">{new Date(ev.time).toLocaleTimeString()}</td><td className="mono-cell">{ev.charge_point_id}</td><td><span className={'badge ' + getEventBadge(ev.type)}>{ev.type}</span></td><td className="mono-cell" style={{maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis'}}>{ev.summary || '-'}</td></tr>
+            <div className="card-header"><h3>Recent Activity</h3><span className="text-secondary" style={{fontSize: 12}}>{effectiveCpId ? `Latest events · ${effectiveCpId}` : 'Latest events · all chargers'}</span></div>
+            <div className="card-body">
+              <div className="event-filters" role="group" aria-label="Filter recent activity">
+                {EVENT_FILTERS.map((filter) => (
+                  <button key={filter.id} type="button" className={'event-filter' + (eventFilter === filter.id ? ' active' : '')}
+                    aria-pressed={eventFilter === filter.id} onClick={() => { setEventFilter(filter.id); setShowAllEvents(false); }}>
+                    {filter.label}
+                  </button>
                 ))}
-              </tbody></table></div>)}
+              </div>
+              {visibleEvents.length === 0 ? <div className="empty-state"><p>No matching events in the recent event buffer.</p></div> : (
+                <ol className="event-list">
+                  {visibleEvents.map((event, index) => (
+                    <li className="event-item" key={`${event.time}-${event.type}-${event.charge_point_id}-${index}`}>
+                      <div className="event-meta">
+                        <time dateTime={event.time}>{new Date(event.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
+                        <span className={'badge ' + getEventBadge(event.type)}>{event.type.replaceAll('_', ' ')}</span>
+                        {!effectiveCpId && <span className="event-charge-point">{event.charge_point_id}</span>}
+                      </div>
+                      <p className="event-summary">{event.summary || 'No additional details'}</p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {filteredEvents.length > 8 && (
+                <button type="button" className="event-more" aria-expanded={showAllEvents} onClick={() => setShowAllEvents((value) => !value)}>
+                  {showAllEvents ? 'Show fewer' : `Show all ${filteredEvents.length} matching events`}
+                </button>
+              )}
             </div>
           </div>
 

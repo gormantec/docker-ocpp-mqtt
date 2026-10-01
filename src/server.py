@@ -397,6 +397,7 @@ def _daily_usage_60d_for_debug(now: datetime) -> dict:
             "export_kwh": round(export_kwh, 3),
             "net_kwh": round(net_kwh, 3),
             "cost": round(cost, 4),
+            "samples": int(bucket.get("samples", 0)),
             "avg_price_per_kw": round(day_price, 5),
         })
 
@@ -1148,6 +1149,16 @@ async def handle_debug(request):
         "ui_port": UI_PORT,
         "charge_points": charge_points,
         "recent_events": recent_events[:50],
+        "solar_control": {
+            "grid_import_threshold_w": SOLAR_GRID_IMPORT_THRESHOLD,
+            "states": {
+                cp_id: {
+                    "target_watts": state.get("throttled_watts"),
+                    "direction": state.get("direction"),
+                }
+                for cp_id, state in _solar_throttle.items()
+            },
+        },
         "solar_metrics": {
             "grid_import": _solar_metrics["grid_import"],
             "grid_export": _solar_metrics["grid_export"],
@@ -1159,6 +1170,16 @@ async def handle_debug(request):
         "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
         "hourly_history": _hourly_history_for_debug(now),
         "daily_usage_60d": _daily_usage_60d_for_debug(now),
+        "grid_tariff": {
+            "off_peak_rate": OFFPEAK_RATE,
+            "off_peak_start_hour": 0,
+            "off_peak_end_hour": 6,
+            "general_rate": GENERAL_RATE,
+            "summer_demand_rate": SUMMER_DEMAND_RATE,
+            "non_summer_demand_rate": NON_SUMMER_DEMAND_RATE,
+            "feed_in_tariff": FEED_IN_TARIFF,
+            "timezone": str(ENERGY_TZ),
+        },
     })
 
 

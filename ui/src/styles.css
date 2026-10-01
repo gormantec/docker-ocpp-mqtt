@@ -179,6 +179,79 @@ body {
   font-weight: 500;
 }
 
+.summary-subtext {
+  display: block;
+  margin-top: 3px;
+  color: var(--aws-text-secondary);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.summary-subtext.is-stale { color: #A94400; }
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--aws-white);
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  color: var(--aws-text-secondary);
+  font-size: 12px;
+}
+
+.connection-status strong { color: var(--aws-text); }
+
+.connection-status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--aws-red);
+}
+
+.connection-status.is-connected .connection-status-dot { background: var(--aws-green); }
+
+.connection-status-state {
+  margin-left: auto;
+  color: var(--aws-text);
+}
+
+.power-context {
+  display: grid;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--aws-blue);
+  background: #F2F8FC;
+  color: var(--aws-text-secondary);
+  font-size: 12px;
+}
+
+.power-context strong { color: var(--aws-text); }
+
+.tariff-details {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--aws-border);
+  color: var(--aws-text-secondary);
+  font-size: 12px;
+}
+
+.tariff-details summary {
+  color: var(--aws-blue);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tariff-detail-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
 .graph-toolbar {
   display: inline-flex;
   border: 1px solid var(--aws-border);
@@ -253,6 +326,71 @@ body {
 .mono-cell {
   font-family: 'SF Mono', 'Source Code Pro', 'Fira Code', monospace;
   font-size: 12px;
+}
+
+.event-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.event-filter {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  background: #F8F9FA;
+  color: var(--aws-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.event-filter.active {
+  border-color: var(--aws-blue);
+  background: var(--aws-blue);
+  color: #fff;
+}
+
+.event-list { list-style: none; }
+
+.event-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--aws-border);
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--aws-text-secondary);
+  font-size: 12px;
+}
+
+.event-summary {
+  color: var(--aws-text);
+  overflow-wrap: anywhere;
+}
+
+.event-charge-point { font-family: monospace; }
+
+.event-more {
+  min-height: 40px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--aws-border);
+  border-radius: 4px;
+  background: var(--aws-white);
+  color: var(--aws-blue);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 /* ===== Badges ===== */
@@ -526,6 +664,15 @@ body {
 }
 
 @media (max-width: 640px) {
+  .main-content { padding: 14px 12px; }
+
+  .connection-status { flex-wrap: wrap; }
+
+  .connection-status-state {
+    width: 100%;
+    margin-left: 17px;
+  }
+
   .summary-card {
     padding: 14px;
   }
@@ -537,6 +684,56 @@ body {
   .summary-label {
     font-size: 12px;
   }
+
+  .table-wrap { overflow-x: visible; }
+
+  .data-table,
+  .data-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .data-table thead { display: none; }
+
+  .data-table tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  .data-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 12px;
+    padding: 6px 12px;
+    border: 1px solid var(--aws-border);
+    border-radius: 4px;
+  }
+
+  .data-table tbody td {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 8px 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .data-table tbody td::before {
+    content: attr(data-label);
+    color: var(--aws-text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .data-table tbody td[colspan] {
+    grid-column: 1 / -1;
+    align-items: center;
+  }
+
+  .data-table tbody td[colspan]::before { content: none; }
 }
 
 /* ===== OCPP Settings Modal ===== */
