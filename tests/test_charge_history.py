@@ -36,6 +36,18 @@ class ChargeHistoryTests(unittest.TestCase):
 
         self.assertIsNone(values[0]["soc_percent"])
 
+    def test_parses_snake_case_meter_values_from_ocpp_handler(self):
+        values = parse_meter_values([{
+            "timestamp": "2026-10-02T00:00:00Z",
+            "sampled_value": [
+                {"value": "1531", "measurand": "Power.Active.Import", "unit": "W"},
+                {"value": "2491880", "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
+            ],
+        }])
+
+        self.assertEqual(values[0]["power_w"], 1531)
+        self.assertEqual(values[0]["energy_wh"], 2491880)
+
     def test_cumulative_energy_delta_handles_meter_reset(self):
         state = {"last_energy_wh": 1000, "energy_delivered_wh": 0}
 

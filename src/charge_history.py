@@ -24,7 +24,8 @@ def parse_meter_values(meter_values):
 
         measurements = []
         values = {}
-        for sample in entry.get("sampledValue", []):
+        sampled_values = entry.get("sampled_value", entry.get("sampledValue", []))
+        for sample in sampled_values:
             if not isinstance(sample, Mapping):
                 continue
             item = dict(sample)
