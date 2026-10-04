@@ -432,11 +432,11 @@ function ChargerPage({ routeCpId }) {
               </div>
               <div className="summary-label">
                 Today Net Grid Spend
-                <span className="summary-subtext">
-                  {Number(todayUsage?.samples || 0) > 0
-                    ? `${Number(todayUsage.usage_kwh || 0).toFixed(2)} kWh imported · estimate`
-                    : 'Waiting for site meter samples'}
-                </span>
+                {Number(todayUsage?.samples || 0) > 0 && (
+                  <span className="summary-subtext">
+                    {`${Number(todayUsage.usage_kwh || 0).toFixed(2)} kWh imported · estimate`}
+                  </span>
+                )}
               </div>
             </div>
             <div className="summary-card">
