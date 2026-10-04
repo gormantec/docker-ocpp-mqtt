@@ -860,7 +860,8 @@ function Home() {
 }
 
 export default function App() {
-  const rel = window.location.pathname.startsWith(BASE) ? window.location.pathname.slice(BASE.length) : window.location.pathname.replace(/^\//, '');
+  const path = window.location.pathname.endsWith('/') ? window.location.pathname : window.location.pathname + '/';
+  const rel = path.startsWith(BASE) ? path.slice(BASE.length) : window.location.pathname.slice(BASE.length) : window.location.pathname.replace(/^\//, '');
   const cpId = decodeURIComponent(rel.split('/')[0] || '');
   return cpId ? <ChargerPage routeCpId={cpId} /> : <Home />;
 }
