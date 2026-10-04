@@ -119,11 +119,12 @@ const formatReadingAge = (timestamp) => {
   return `${Math.floor(elapsedSeconds / 60)}m ago`;
 };
 
-const formatSiteAge = (timestamp) => {
+const tileAge = (timestamp, thresholdSeconds = 180) => {
   const timestampMs = Date.parse(timestamp || '');
   if (!Number.isFinite(timestampMs)) return '';
-  const minutes = Math.floor((Date.now() - timestampMs) / 60000);
-  return minutes >= 3 ? `${minutes}min ago` : '';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
+  if (seconds < thresholdSeconds) return '';
+  return seconds < 60 ? `${seconds}sec ago` : `${Math.floor(seconds / 60)}min ago`;
 };
 
 const readingIsStale = (timestamp) => {
@@ -414,26 +415,16 @@ function ChargerPage({ routeCpId }) {
           </div>
           <div className="summary-cards">
             <div className="summary-card">
+              <span className="tile-age">{tileAge(powerSummary.lastReportedAt, 30)}</span>
               <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 && !powerIsStale ? ' text-green' : '')}>{powerSummary.watts != null ? formatPower(totalPower) : '—'}</div>
-              <div className="summary-label">
-                Charging Power
-                <span className={'summary-subtext' + (powerIsStale ? ' is-stale' : '')}>
-                  {powerSummary.lastReportedAt
-                    ? `${powerIsStale ? 'Stale charger reading' : 'Charger report'} · ${formatReadingAge(powerSummary.lastReportedAt)}`
-                    : 'No charger meter reading'}
-                </span>
-              </div>
+              <div className="summary-label">Charging Power</div>
             </div>
             <div className="summary-card">
+              <span className="tile-age">{tileAge(solar.last_update)}</span>
               <div className={'summary-value' + (solar.grid_import > 0 ? ' text-red' : ' text-green')}>
                 {solar.last_update ? formatPower(solar.grid_import || 0) : '—'}
               </div>
-              <div className="summary-label">
-                Grid Import
-                <span className={'summary-subtext' + (solarTelemetryIsStale ? ' is-stale' : '')}>
-                  {formatSiteAge(solar.last_update)}
-                </span>
-              </div>
+              <div className="summary-label">Grid Import</div>
             </div>
             <div className="summary-card">
               <div className="summary-value">
@@ -449,12 +440,14 @@ function ChargerPage({ routeCpId }) {
               </div>
             </div>
             <div className="summary-card">
+              <span className="tile-age">{tileAge(solar.last_update)}</span>
               <div className={'summary-value' + (solar.grid_export > 2000 ? ' text-green' : '')}>
                 {solar.last_update ? formatPower(solar.grid_export || 0) : '—'}
               </div>
               <div className="summary-label">Grid Export</div>
             </div>
             <div className="summary-card">
+              <span className="tile-age">{tileAge(solar.last_update)}</span>
               <div className={'summary-value' + (solar.battery_soc > 50 ? ' text-green' : solar.battery_soc <= 50 ? ' text-warn' : '')}>
                 {solar.battery_soc == null ? '—' : `${solar.battery_soc}%`}
               </div>

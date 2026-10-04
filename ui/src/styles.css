@@ -149,6 +149,7 @@ body {
 }
 
 .summary-card {
+  position: relative;
   background: var(--aws-white);
   border: 1px solid var(--aws-border);
   border-radius: 4px;
@@ -878,4 +879,13 @@ body {
 @media (max-width: 640px) {
   .brand-long { display: none; }
   .brand-short { display: inline; }
+}
+
+.tile-age {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 11px;
+  color: #9AA0A6;
+  pointer-events: none;
 }
