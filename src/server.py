@@ -51,7 +51,7 @@ from ocpp.v16.call import (
     RemoteStartTransaction, RemoteStopTransaction, Reset, UnlockConnector,
     GetConfiguration, ChangeConfiguration, ClearCache, TriggerMessage,
     GetDiagnostics, UpdateFirmware, ChangeAvailability, GetLocalListVersion,
-    SendLocalList, SetChargingProfile, ClearChargingProfile,
+    SendLocalList, SetChargingProfile, ClearChargingProfile, GetCompositeSchedule,
 )
 
 # Shared MQTT helpers (same pattern as other docker-iot containers)
@@ -992,6 +992,7 @@ async def ocpp_ws_handler(request: web.Request):
     _active_cps[cp_id] = cp
     await _mark_charge_point_reconnected(cp_id, datetime.now(timezone.utc))
     asyncio.create_task(cp._configure_meter_reporting())
+    asyncio.create_task(_sync_profile_on_connect(cp_id, cp))
 
     try:
         await cp.start()
@@ -1214,6 +1215,7 @@ async def handle_debug(request):
             "last_update": _solar_metrics["last_update"].isoformat() if _solar_metrics["last_update"] else None,
         },
         "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
+        "profile_checks": _profile_checks,
         "hourly_history": _hourly_history_for_debug(now),
         "daily_usage_60d": _daily_usage_60d_for_debug(now),
         "grid_tariff": {
@@ -1708,6 +1710,266 @@ async def _try_auto_off_peak_start(cp_id: str, cp, window_key: str):
         _LOGGER.warning("AUTO off-peak RemoteStartTransaction failed for %s: %s", cp_id, e)
 
 
+# ---------------------------------------------------------------------------
+# Charging profile management + verification
+# ---------------------------------------------------------------------------
+
+PROFILE_ID = 1                      # Single profile id used by every mode
+CHARGE_NOW_WATTS = 4800.0
+DEFAULT_VOLTAGE = 230.0
+VERIFY_DELAY_SECONDS = 4
+WATCHDOG_INTERVAL_SECONDS = 120
+HEAL_COOLDOWN_SECONDS = 600
+LIMIT_TOLERANCE_W = 100.0
+
+# {cp_id: last verification result}
+_profile_checks: dict[str, dict] = {}
+_last_heal: dict[str, float] = {}
+_last_current_alert: dict[str, float] = {}
+
+
+def _result_get(obj, *names):
+    """Read a field from a dataclass or dict, accepting snake/camel names."""
+    for name in names:
+        if isinstance(obj, dict):
+            if name in obj:
+                return obj[name]
+        elif hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+async def _clear_all_profiles(cp, call=None) -> list[str]:
+    """Remove every stored charging profile (not just id=1 / TxDefault stack 0)."""
+    call = call or (lambda _label, obj: cp.call(obj))
+    statuses = []
+    res = await call("ClearChargingProfile(all)", ClearChargingProfile())
+    statuses.append(str(getattr(res, "status", res)))
+    for purpose in ("TxDefaultProfile", "TxProfile", "ChargePointMaxProfile"):
+        res = await call(f"ClearChargingProfile({purpose})",
+                         ClearChargingProfile(charging_profile_purpose=purpose))
+        statuses.append(f"{purpose}={getattr(res, 'status', res)}")
+    return statuses
+
+
+def _expected_limit_w(cp_id: str) -> float | None:
+    config = _get_schedule(cp_id)
+    mode = config.get("mode", "charge_now")
+    if mode == "stop":
+        return 0.0
+    if mode == "charge_now":
+        return CHARGE_NOW_WATTS
+    hour = datetime.now(_get_tz(cp_id)).hour
+    if cp_id in _solar_throttle and not _is_off_peak(cp_id):
+        return float(_solar_throttle[cp_id]["throttled_watts"])
+    return float(_get_period_limit_for_hour(cp_id, hour))
+
+
+def _measured_voltage(cp_id: str) -> float:
+    mv = (_cp_state.get(cp_id, {}).get("meter_values", {}) or {}).get("1") or {}
+    try:
+        v = float(mv.get("voltage_v"))
+        if 180 <= v <= 280:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return DEFAULT_VOLTAGE
+
+
+async def _reapply_mode_profile(cp_id: str, cp, reason: str):
+    """Clear all stored profiles, then push the profile for the current mode."""
+    from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
+    config = _get_schedule(cp_id)
+    mode = config.get("mode", "charge_now")
+    if mode == "stop":
+        periods = [(0, 0.0)]
+    elif mode == "charge_now":
+        periods = [(0, CHARGE_NOW_WATTS)]
+    else:
+        periods = [(p["start_hour"] * 3600, p["limit_watts"])
+                   for p in config.get("periods", DEFAULT_SCHEDULE["periods"])]
+    clear = await _clear_all_profiles(cp)
+    kwargs = {}
+    if mode == "auto":
+        kind = ChargingProfileKindType.recurring
+        kwargs["recurrency_kind"] = RecurrencyKind.daily
+    else:
+        kind = ChargingProfileKindType.relative
+    result = await cp.call(SetChargingProfile(
+        connector_id=0,
+        cs_charging_profiles=ChargingProfile(
+            charging_profile_id=PROFILE_ID, stack_level=0,
+            charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
+            charging_profile_kind=kind,
+            charging_schedule=ChargingSchedule(
+                charging_rate_unit="W",
+                charging_schedule_period=[
+                    ChargingSchedulePeriod(start_period=s, limit=l) for s, l in periods
+                ],
+            ),
+            **kwargs,
+        ),
+    ))
+    status = str(getattr(result, "status", result))
+    _solar_throttle.pop(cp_id, None)
+    _record_event(cp_id, "profile_sync", f"{reason}: mode={mode} clear={clear} set={status}")
+    _LOGGER.info("Profile sync for %s (%s): mode=%s clear=%s set=%s",
+                 cp_id, reason, mode, clear, status)
+    return status
+
+
+async def _verify_profile(cp_id: str, cp=None, reason: str = "check") -> dict:
+    """Ask the charger for its composite schedule and compare with what we expect."""
+    cp = cp or _active_cps.get(cp_id)
+    expected_w = _expected_limit_w(cp_id)
+    voltage = _measured_voltage(cp_id)
+    check = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "mode": _get_schedule(cp_id).get("mode", "charge_now"),
+        "expected_w": expected_w,
+        "expected_a": round(expected_w / voltage, 1) if expected_w is not None else None,
+        "voltage_v": voltage,
+        "actual_w": None,
+        "actual_a": None,
+        "unit": None,
+        "periods": None,
+        "status": None,
+        "ok": None,
+    }
+    if not cp:
+        check["status"] = "not_connected"
+        _profile_checks[cp_id] = check
+        return check
+    try:
+        res = await asyncio.wait_for(cp.call(GetCompositeSchedule(
+            connector_id=1, duration=3600, charging_rate_unit="W",
+        )), timeout=SCHEDULE_OCPP_TIMEOUT_SECONDS)
+        check["status"] = str(_result_get(res, "status"))
+        schedule = _result_get(res, "charging_schedule", "chargingSchedule")
+        periods = _result_get(schedule, "charging_schedule_period", "chargingSchedulePeriod") if schedule else None
+        unit = _result_get(schedule, "charging_rate_unit", "chargingRateUnit") if schedule else None
+        unit = getattr(unit, "value", unit)
+        if periods:
+            check["periods"] = [
+                {"start": _result_get(p, "start_period", "startPeriod"), "limit": _result_get(p, "limit")}
+                for p in periods
+            ]
+            first = float(check["periods"][0]["limit"])
+            check["unit"] = unit
+            if unit == "A":
+                check["actual_a"] = first
+                check["actual_w"] = round(first * voltage)
+            else:
+                check["actual_w"] = first
+                check["actual_a"] = round(first / voltage, 1)
+            if expected_w is not None:
+                check["ok"] = abs(check["actual_w"] - expected_w) <= max(LIMIT_TOLERANCE_W, expected_w * 0.05)
+        elif check["status"] == "Accepted":
+            check["ok"] = False  # charger accepted but reports no schedule at all
+    except Exception as e:
+        check["status"] = f"error: {e}"
+
+    mv = (_cp_state.get(cp_id, {}).get("meter_values", {}) or {}).get("1") or {}
+    check["measured_a"] = mv.get("current_a")
+    check["measured_w"] = mv.get("power")
+
+    _profile_checks[cp_id] = check
+    level = "OK" if check["ok"] else "MISMATCH" if check["ok"] is False else "UNKNOWN"
+    _record_event(cp_id, "profile_check",
+                  f"{level} expected={expected_w}W/{check['expected_a']}A "
+                  f"charger={check['actual_w']}W/{check['actual_a']}A ({reason})",
+                  check)
+    if check["ok"] is False:
+        _LOGGER.warning("Profile MISMATCH on %s: expected %sW charger reports %sW (%s)",
+                        cp_id, expected_w, check["actual_w"], reason)
+    return check
+
+
+async def _verify_profile_later(cp_id: str, reason: str):
+    await asyncio.sleep(VERIFY_DELAY_SECONDS)
+    await _verify_profile(cp_id, reason=reason)
+
+
+async def _profile_watchdog_tick():
+    for cp_id, cp in list(_active_cps.items()):
+        check = await _verify_profile(cp_id, cp, reason="watchdog")
+        now = time.time()
+        if check["ok"] is False and now - _last_heal.get(cp_id, 0) > HEAL_COOLDOWN_SECONDS:
+            _last_heal[cp_id] = now
+            try:
+                await _reapply_mode_profile(cp_id, cp, "self-heal after mismatch")
+                await asyncio.sleep(VERIFY_DELAY_SECONDS)
+                await _verify_profile(cp_id, cp, reason="post-heal")
+            except Exception as e:
+                _LOGGER.warning("Self-heal failed for %s: %s", cp_id, e)
+
+        # Actual current vs commanded: informational (the car may legitimately draw less)
+        status = _cp_state.get(cp_id, {}).get("connectors", {}).get("1")
+        exp_a, meas_a = check.get("expected_a"), check.get("measured_a")
+        if status == "Charging" and exp_a and meas_a is not None:
+            try:
+                meas_a = float(meas_a)
+            except (TypeError, ValueError):
+                continue
+            if meas_a < exp_a * 0.8 and now - _last_current_alert.get(cp_id, 0) > 900:
+                _last_current_alert[cp_id] = now
+                _record_event(cp_id, "current_mismatch",
+                              f"charging at {meas_a:.1f}A but expected up to {exp_a:.1f}A "
+                              f"(charger reports limit {check.get('actual_a')}A)", check)
+
+
+async def _profile_watchdog_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await _profile_watchdog_tick()
+        except Exception as e:
+            _LOGGER.error("Profile watchdog error: %s", e)
+        await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+
+async def _sync_profile_on_connect(cp_id: str, cp):
+    """A (re)connected charger may hold stale profiles: wipe and push the current mode."""
+    await asyncio.sleep(5)
+    if _active_cps.get(cp_id) is not cp:
+        return
+    try:
+        await _reapply_mode_profile(cp_id, cp, "charger connected")
+        await _verify_profile_later(cp_id, "post-connect")
+    except Exception as e:
+        _LOGGER.warning("Profile sync on connect failed for %s: %s", cp_id, e)
+
+
+async def handle_profile_check(request):
+    """GET /profile-check/{cp_id}[?fix=1] — live GetCompositeSchedule + smart-charging config."""
+    cp_id = request.match_info.get("cp_id", "")
+    cp = _active_cps.get(cp_id)
+    if not cp:
+        return web.json_response({"error": f"Charge point {cp_id} not connected"}, status=404)
+    out = {}
+    if request.query.get("fix"):
+        try:
+            out["resync"] = await _reapply_mode_profile(cp_id, cp, "manual fix")
+            await asyncio.sleep(VERIFY_DELAY_SECONDS)
+        except Exception as e:
+            out["resync"] = f"error: {e}"
+    out["check"] = await _verify_profile(cp_id, cp, reason="manual")
+    try:
+        res = await asyncio.wait_for(cp.call(GetConfiguration(key=[
+            "ChargeProfileMaxStackLevel", "ChargingScheduleAllowedChargingRateUnit",
+            "ChargingScheduleMaxPeriods", "MaxChargingProfilesInstalled",
+            "ConnectorSwitch3to1PhaseSupported", "SupportedFeatureProfiles",
+        ])), timeout=SCHEDULE_OCPP_TIMEOUT_SECONDS)
+        out["configuration"] = {
+            _result_get(i, "key"): _result_get(i, "value")
+            for i in (_result_get(res, "configuration_key", "configurationKey") or [])
+        }
+    except Exception as e:
+        out["configuration"] = f"error: {e}"
+    return web.json_response(out)
+
+
 async def _apply_throttled_watts(cp_id: str, watts: float):
     """Send SetChargingProfile with a throttled watt limit."""
     cp = _active_cps.get(cp_id)
@@ -1758,11 +2020,13 @@ async def _solar_smart_tick():
         if _is_off_peak(cp_id):
             tz = _get_tz(cp_id)
             hour = datetime.now(tz).hour
-            configured_watts = _get_period_limit_for_hour(cp_id, hour)
             if cp_id in _solar_throttle:
-                del _solar_throttle[cp_id]
-                await _apply_throttled_watts(cp_id, configured_watts)
-                _LOGGER.info("Solar Smart: %s off-peak, reset to %.0fW", cp_id, configured_watts)
+                try:
+                    await _reapply_mode_profile(cp_id, cp, "off-peak: restore full schedule")
+                except Exception as e:
+                    _LOGGER.warning("Solar Smart: off-peak restore failed for %s: %s", cp_id, e)
+                else:
+                    asyncio.create_task(_verify_profile_later(cp_id, "off-peak restore"))
             continue
 
         grid_import = _solar_metrics.get("grid_import", 0)
@@ -1939,7 +2203,14 @@ async def handle_schedule_post(request):
                     _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
                     call_warnings.append(msg)
                     return None
-                return task.result()
+                result = task.result()
+                status = str(getattr(result, "status", "Accepted"))
+                is_clear = label.startswith("ClearChargingProfile")
+                if status in ("Rejected", "NotSupported") or (status == "Unknown" and not is_clear):
+                    msg = f"{label} returned {status}"
+                    _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
+                    call_warnings.append(msg)
+                return result
             except asyncio.CancelledError:
                 msg = f"{label} timed out after {SCHEDULE_OCPP_TIMEOUT_SECONDS:.0f}s"
                 _LOGGER.warning("Schedule %s on %s: %s", mode, cp_id, msg)
@@ -1952,10 +2223,7 @@ async def handle_schedule_post(request):
 
         if mode == "stop":
             _LOGGER.info("STOP mode for %s — clearing profile + stopping any active charge", cp_id)
-            await safe_cp_call("ClearChargingProfile", ClearChargingProfile(
-                id=1, connector_id=0,
-                charging_profile_purpose="TxDefaultProfile", stack_level=0,
-            ))
+            await _clear_all_profiles(cp, safe_cp_call)
             if not call_warnings:
                 tx_id = _tx_ids.get(cp_id, 0)
                 if tx_id:
@@ -1988,6 +2256,8 @@ async def handle_schedule_post(request):
                 ))
             desc = ", ".join(f"{p['start_hour']:02d}:00→{p['limit_watts']:.0f}W" for p in periods)
             _LOGGER.info("AUTO mode for %s — periods (Recurring+Daily): %s", cp_id, desc)
+            _solar_throttle.pop(cp_id, None)
+            await _clear_all_profiles(cp, safe_cp_call)
             await safe_cp_call("SetChargingProfile(auto)", SetChargingProfile(
                 connector_id=0,
                 cs_charging_profiles=ChargingProfile(
@@ -2005,21 +2275,19 @@ async def handle_schedule_post(request):
 
         else:  # charge_now
             _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)
-            await safe_cp_call("ClearChargingProfile", ClearChargingProfile(
-                id=1, connector_id=0,
-                charging_profile_purpose="TxDefaultProfile", stack_level=0,
-            ))
+            _solar_throttle.pop(cp_id, None)
+            await _clear_all_profiles(cp, safe_cp_call)
             if not call_warnings:
                 await safe_cp_call("SetChargingProfile(charge_now)", SetChargingProfile(
                     connector_id=0,
                     cs_charging_profiles=ChargingProfile(
-                        charging_profile_id=0, stack_level=0,
+                        charging_profile_id=PROFILE_ID, stack_level=0,
                         charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
                         charging_profile_kind=ChargingProfileKindType.relative,
                         charging_schedule=ChargingSchedule(
                             charging_rate_unit=ChargingRateUnitType.watts,
                             charging_schedule_period=[
-                                ChargingSchedulePeriod(start_period=0, limit=4800.0),
+                                ChargingSchedulePeriod(start_period=0, limit=CHARGE_NOW_WATTS),
                             ],
                         ),
                     ),
@@ -2039,6 +2307,7 @@ async def handle_schedule_post(request):
 
         # Persist to DocumentDB
         asyncio.create_task(_docdb_save_schedule(cp_id))
+        asyncio.create_task(_verify_profile_later(cp_id, f"mode change → {mode}"))
 
         await _mqtt_publish(_cp_topic(cp_id, "schedule"), {"mode": mode})
         response = {"status": "ok", "mode": mode, "config": config}
@@ -2202,6 +2471,7 @@ async def main():
     # Start Solar Smart background loop
     asyncio.create_task(_solar_smart_loop())
     asyncio.create_task(_hourly_history_loop())
+    asyncio.create_task(_profile_watchdog_loop())
 
     app = web.Application()
 
@@ -2213,6 +2483,7 @@ async def main():
     app.router.add_put("/schedule", handle_schedule_post)
     app.router.add_get("/timezones", handle_timezones)
     app.router.add_get("/test-profile/{cp_id}", handle_test_profile)
+    app.router.add_get("/profile-check/{cp_id}", handle_profile_check)
 
     # OCPP WebSocket endpoint — chargers connect via wss://ocpp.gormantec.com/ocpp16/{cp_id}
     app.router.add_get("/ocpp16/{cp_id}", ocpp_ws_handler)
