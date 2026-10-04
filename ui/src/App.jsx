@@ -794,7 +794,12 @@ function Home() {
         const res = await fetch(BASE + 'debug');
         if (!res.ok) throw new Error('Server unavailable');
         const json = await res.json();
-        setCps(json.charge_points || []);
+        const list = json.charge_points || [];
+        if (list.length === 1) {
+          window.location.replace(BASE + encodeURIComponent(list[0].id));
+          return;
+        }
+        setCps(list);
         setError(null);
       } catch {
         setError('Connection lost - retrying...');
