@@ -589,7 +589,7 @@ function ChargerPage({ routeCpId }) {
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#3a4552" />
                       <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#95a5a6' }} />
-                      <YAxis tick={{ fontSize: 12, fill: '#95a5a6' }} />
+                      <YAxis domain={[0, (dataMax) => Math.max(2000, dataMax)]} tick={{ fontSize: 12, fill: '#95a5a6' }} />
                       <Tooltip formatter={(v) => v + 'W'} />
                       <Bar dataKey="value" radius={[2, 2, 0, 0]}>
                         <Cell fill="#FF9900" /><Cell fill="#0A7D4C" /><Cell fill="#D13212" /><Cell fill="#0073BB" />
