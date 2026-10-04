@@ -164,6 +164,17 @@ const getEventBadge = (type) => {
   return m[type] || 'badge-info';
 };
 
+function InfoTip({ text }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span style={{position: 'relative', display: 'inline-block', marginLeft: 6}}>
+      <button type="button" aria-label="More info" onClick={(e) => { e.preventDefault(); setOpen(o => !o); }} onBlur={() => setOpen(false)}
+        style={{width: 18, height: 18, borderRadius: '50%', border: '1px solid #0073BB', background: open ? '#0073BB' : 'transparent', color: open ? '#fff' : '#0073BB', fontSize: 11, fontWeight: 700, lineHeight: '16px', padding: 0, cursor: 'pointer'}}>i</button>
+      {open && <span role="tooltip" style={{position: 'absolute', left: -8, top: 24, zIndex: 50, width: 240, padding: '8px 10px', background: '#232F3E', color: '#fff', borderRadius: 6, fontSize: 12, fontWeight: 400, lineHeight: 1.4, boxShadow: '0 2px 8px rgba(0,0,0,.3)'}}>{text}</span>}
+    </span>
+  );
+}
+
 function ChargerPage({ routeCpId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -301,7 +312,7 @@ function ChargerPage({ routeCpId }) {
     const payload = {
       cp_id: effectiveCpId,
       mode: currentMode,
-      timezone: editTimezone,
+      timezone: schedule[effectiveCpId]?.timezone || editTimezone,
       off_peak_start_hour: editOffPeakStart,
       off_peak_end_hour: editOffPeakEnd,
       max_amps: editMaxAmps,
@@ -755,21 +766,21 @@ function ChargerPage({ routeCpId }) {
               <div className="card-header"><h3>⚙ Configure Schedule - {effectiveCpId}</h3><button className="btn btn-secondary" style={{padding: '4px 10px'}} onClick={() => setShowConfig(false)}>✕</button></div>
               <div className="card-body">
                 <div style={{marginBottom: 16}}>
-                  <label className="ocpp-field-label">Timezone</label>
-                  <select value={editTimezone} onChange={(e) => setEditTimezone(e.target.value)}
-                    className="ocpp-input">
-                    {(timezones.length > 0 ? timezones : ['Australia/Sydney', 'UTC']).map(tz => (<option key={tz} value={tz}>{tz}</option>))}
-                  </select>
+                  <label className="ocpp-field-label">Off-peak window (grid power allowed)<InfoTip text="Hours when grid power is cheap. Auto charges at the maximum current during this window, even if solar and battery are low. Outside it, Auto never imports from the grid." /></label>
+                  <div className="ocpp-period-row">
+                    <input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" aria-label="Off-peak start hour" />
+                    <span style={{alignSelf: 'center'}}>to</span>
+                    <input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" aria-label="Off-peak end hour" />
+                  </div>
                 </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak Start (hour)</label><input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak End (hour)</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
+                <div style={{marginBottom: 16}}>
+                  <label className="ocpp-field-label">Max current<InfoTip text="Highest current Auto will ever use. Your MG HS tops out at 16A, so 16A is right. Auto steps through OFF, 6A, 8A, 16A up to this limit." /></label>
+                  <select value={editMaxAmps} onChange={(e) => setEditMaxAmps(parseInt(e.target.value, 10))} className="ocpp-input ocpp-input-sm">{[6, 8, 16, 32].map(a => <option key={a} value={a}>{a}A</option>)}</select>
                 </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Max Current</label><select value={editMaxAmps} onChange={(e) => setEditMaxAmps(parseInt(e.target.value, 10))} className="ocpp-input ocpp-input-sm">{[6, 8, 16, 32].map(a => <option key={a} value={a}>{a}A</option>)}</select></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Min Battery % (outside off-peak)</label><input type="number" min={0} max={100} value={editMinBatterySoc} onChange={(e) => setEditMinBatterySoc(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
+                <div style={{marginBottom: 16}}>
+                  <label className="ocpp-field-label">Keep home battery above (%)<InfoTip text="Outside off-peak, Auto stops charging the car if the home battery falls below this level, so the house keeps its reserve." /></label>
+                  <input type="number" min={0} max={100} value={editMinBatterySoc} onChange={(e) => setEditMinBatterySoc(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" />
                 </div>
-                <p className="hint ocpp-help-text" style={{marginBottom: 16, fontSize: 13}}>Auto mode picks OFF / 6A / 8A / 16A / 32A (up to Max Current). It only buys grid power during off-peak; otherwise it follows solar and battery surplus.</p>
                 <div style={{display: 'flex', gap: 8}}>
                   <button className="btn btn-secondary" style={{flex: 1}} onClick={() => setShowConfig(false)}>Cancel</button>
                   <button className="btn btn-primary" style={{flex: 1}} disabled={schedulePending} onClick={saveScheduleConfig}>Save</button>
