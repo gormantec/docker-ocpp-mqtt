@@ -384,7 +384,7 @@ function ChargerPage({ routeCpId }) {
       <header className="aws-navbar">
         <div className="navbar-brand">
           <a href={BASE} style={{color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8}}><span className="brand-icon">🔌</span><span>IoT Core</span>
-          <span className="brand-divider">|</span><span className="brand-service">OCPP MQTT Bridge</span></a>
+          <span className="brand-divider">|</span><span className="brand-service">OCPP</span></a>
           <span className="brand-divider">|</span><span className="brand-service">{routeCpId}</span>
         </div>
         {lastRefresh && <span className="navbar-refresh">Updated: {lastRefresh.toLocaleTimeString()}</span>}
