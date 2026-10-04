@@ -240,10 +240,11 @@ def _current_total_power_watts() -> float:
     return total
 
 
-def _fresh_charger_power_watts(ts: datetime, max_age_s: float = 300.0) -> float:
-    """Charger power from meter values reported within max_age_s (ignores restored stale values)."""
-    total = 0.0
-    for cp in _cp_state.values():
+def _fresh_charger_power_by_cp(ts: datetime, max_age_s: float = 300.0) -> dict[str, float]:
+    """Per-charger power from meter values reported within max_age_s (ignores restored stale values)."""
+    result: dict[str, float] = {}
+    for cp_id, cp in _cp_state.items():
+        total = 0.0
         for conn_id, conn_mv in cp.get("meter_values", {}).items():
             if conn_id == "0":
                 continue
@@ -254,7 +255,8 @@ def _fresh_charger_power_watts(ts: datetime, max_age_s: float = 300.0) -> float:
                 continue
             if isinstance(power, (int, float)) and 0 <= age <= max_age_s:
                 total += max(0.0, float(power))
-    return total
+        result[cp_id] = total
+    return result
 
 
 def _record_hourly_sample(ts: datetime | None = None):
@@ -324,12 +326,16 @@ def _daily_key(ts: datetime) -> str:
     return ts.astimezone(ENERGY_TZ).strftime("%Y-%m-%d")
 
 
-def _import_rate_for_time(ts: datetime) -> float:
+def _import_rate_for_time(ts: datetime, cp_id: str) -> float:
+    cfg = _schedule_configs.get(cp_id) or DEFAULT_SCHEDULE
     local = ts.astimezone(ENERGY_TZ)
-    if 0 <= local.hour < 6:
-        return OFFPEAK_RATE
-    demand = SUMMER_DEMAND_RATE if local.month in SUMMER_MONTHS else NON_SUMMER_DEMAND_RATE
-    return GENERAL_RATE + demand
+    start = cfg.get("off_peak_start_hour", 0)
+    end = cfg.get("off_peak_end_hour", 6)
+    in_off_peak = (start <= local.hour < end) if start < end else (local.hour >= start or local.hour < end)
+    if in_off_peak:
+        return float(cfg.get("off_peak_rate", OFFPEAK_RATE))
+    key = "peak_rate_summer" if local.month in SUMMER_MONTHS else "peak_rate_other"
+    return float(cfg.get(key, DEFAULT_SCHEDULE[key]))
 
 
 def _record_daily_energy_sample(ts: datetime):
@@ -346,10 +352,14 @@ def _record_daily_energy_sample(ts: datetime):
 
     dt_hours = min(dt_hours, 1.0)
 
-    import_kwh = _fresh_charger_power_watts(ts) * dt_hours / 1000.0
+    import_kwh = 0.0
+    cost_delta = 0.0
+    for cp_id, watts in _fresh_charger_power_by_cp(ts).items():
+        kwh = watts * dt_hours / 1000.0
+        import_kwh += kwh
+        cost_delta += kwh * _import_rate_for_time(ts, cp_id)
     export_kwh = 0.0
     load_kwh = import_kwh
-    cost_delta = import_kwh * _import_rate_for_time(ts)
 
     day_key = _daily_key(ts)
     bucket = _daily_energy_history.get(day_key, {
@@ -1227,13 +1237,9 @@ async def handle_debug(request):
         "hourly_history": _hourly_history_for_debug(now),
         "daily_usage_60d": _daily_usage_60d_for_debug(now),
         "grid_tariff": {
-            "off_peak_rate": OFFPEAK_RATE,
-            "off_peak_start_hour": 0,
-            "off_peak_end_hour": 6,
-            "general_rate": GENERAL_RATE,
-            "summer_demand_rate": SUMMER_DEMAND_RATE,
-            "non_summer_demand_rate": NON_SUMMER_DEMAND_RATE,
-            "feed_in_tariff": FEED_IN_TARIFF,
+            **{k: (_schedule_configs.get(next(iter(_cp_state), ""), DEFAULT_SCHEDULE)).get(k, DEFAULT_SCHEDULE[k])
+               for k in ("off_peak_rate", "peak_rate_summer", "peak_rate_other",
+                         "off_peak_start_hour", "off_peak_end_hour")},
             "timezone": str(ENERGY_TZ),
         },
     })
@@ -1294,6 +1300,10 @@ DEFAULT_SCHEDULE = {
     "off_peak_end_hour": 6,
     "max_amps": 16,          # cap for Auto (off-peak and solar)
     "min_battery_soc": 50,   # Auto outside off-peak only runs at/above this %
+    # All-in import prices in $/kWh, used for the charging cost estimate
+    "off_peak_rate": OFFPEAK_RATE,
+    "peak_rate_summer": round(GENERAL_RATE + SUMMER_DEMAND_RATE, 5),
+    "peak_rate_other": round(GENERAL_RATE + NON_SUMMER_DEMAND_RATE, 5),
 }
 AUTO_DEADBAND_W = 150
 
@@ -2198,6 +2208,12 @@ async def handle_schedule_post(request):
             if not (0 <= soc <= 100):
                 return web.json_response({"error": f"Invalid min_battery_soc: {soc}"}, status=400)
             config["min_battery_soc"] = soc
+        for key in ("off_peak_rate", "peak_rate_summer", "peak_rate_other"):
+            if key in body:
+                rate = float(body[key])
+                if not (0 <= rate <= 5):
+                    return web.json_response({"error": f"Invalid {key}: {rate}"}, status=400)
+                config[key] = rate
 
         _schedule_configs[cp_id] = config
         _schedule_state[cp_id] = {"mode": mode}  # backward compat

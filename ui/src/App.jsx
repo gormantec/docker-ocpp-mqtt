@@ -189,6 +189,7 @@ function ChargerPage({ routeCpId }) {
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
   const [editMaxAmps, setEditMaxAmps] = useState(16);
   const [editMinBatterySoc, setEditMinBatterySoc] = useState(50);
+  const [editRates, setEditRates] = useState({ off_peak_rate: 0.08, peak_rate_summer: 0.46761, peak_rate_other: 0.36960 });
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
   const [eventFilter, setEventFilter] = useState('all');
@@ -318,6 +319,7 @@ function ChargerPage({ routeCpId }) {
       off_peak_end_hour: editOffPeakEnd,
       max_amps: editMaxAmps,
       min_battery_soc: editMinBatterySoc,
+      ...editRates,
     };
 
     setSchedulePending(true);
@@ -476,6 +478,7 @@ function ChargerPage({ routeCpId }) {
                   setEditOffPeakEnd(cfg.off_peak_end_hour ?? 6);
                   setEditMaxAmps(cfg.max_amps ?? 16);
                   setEditMinBatterySoc(cfg.min_battery_soc ?? 50);
+                  setEditRates({ off_peak_rate: cfg.off_peak_rate ?? 0.08, peak_rate_summer: cfg.peak_rate_summer ?? 0.46761, peak_rate_other: cfg.peak_rate_other ?? 0.36960 });
                   setShowConfig(true);
                 }}>⚙</button>
             </div>
@@ -615,9 +618,8 @@ function ChargerPage({ routeCpId }) {
                   {data.grid_tariff ? (
                     <div className="tariff-detail-list">
                       <span>Charger energy (kWh) multiplied by the time-of-use rate in effect when it was drawn.</span>
-                      <span>Off-peak: {formatCurrency(data.grid_tariff.off_peak_rate, 4)}/kWh, {String(data.grid_tariff.off_peak_start_hour).padStart(2, '0')}:00–{String(data.grid_tariff.off_peak_end_hour).padStart(2, '0')}:00.</span>
-                      <span>General: {formatCurrency(data.grid_tariff.general_rate, 4)}/kWh plus seasonal demand adder: summer {formatCurrency(data.grid_tariff.summer_demand_rate, 4)}, other months {formatCurrency(data.grid_tariff.non_summer_demand_rate, 4)}.</span>
-                      <span>{data.grid_tariff.timezone}.</span>
+                      <span>Off-peak: {formatCurrency(data.grid_tariff.off_peak_rate, 3)}/kWh, {String(data.grid_tariff.off_peak_start_hour).padStart(2, '0')}:00–{String(data.grid_tariff.off_peak_end_hour).padStart(2, '0')}:00.</span>
+                      <span>Peak: {formatCurrency(data.grid_tariff.peak_rate_summer, 3)}/kWh Dec–Feb, {formatCurrency(data.grid_tariff.peak_rate_other, 3)}/kWh otherwise · {data.grid_tariff.timezone}. Edit in the config (⚙).</span>
                     </div>
                   ) : <p>Tariff settings are unavailable; treat these costs as indicative only.</p>}
                 </details>
@@ -773,6 +775,17 @@ function ChargerPage({ routeCpId }) {
                 <div style={{marginBottom: 16}}>
                   <label className="ocpp-field-label">Keep home battery above (%)<InfoTip text="Outside off-peak, Auto stops charging the car if the home battery falls below this level, so the house keeps its reserve." /></label>
                   <input type="number" min={0} max={100} value={editMinBatterySoc} onChange={(e) => setEditMinBatterySoc(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" />
+                </div>
+                <div style={{marginBottom: 16}}>
+                  <label className="ocpp-field-label">Electricity prices ($/kWh, all-in)<InfoTip text="What you pay per kWh including all charges. Used only to estimate charging cost; it doesn't change how charging is controlled. Peak applies outside the off-peak window." /></label>
+                  <div className="ocpp-period-row">
+                    {[['off_peak_rate', 'Off-peak'], ['peak_rate_summer', 'Peak Dec–Feb'], ['peak_rate_other', 'Peak Mar–Nov']].map(([k, lbl]) => (
+                      <div key={k} style={{flex: 1}}>
+                        <label className="ocpp-small-label">{lbl}</label>
+                        <input type="number" step="0.001" min={0} value={editRates[k]} onChange={(e) => setEditRates({ ...editRates, [k]: parseFloat(e.target.value) || 0 })} className="ocpp-input ocpp-input-sm" />
+                      </div>
+                    ))}
+                  </div>
                 </div>
                 <div style={{display: 'flex', gap: 8}}>
                   <button className="btn btn-secondary" style={{flex: 1}} onClick={() => setShowConfig(false)}>Cancel</button>
