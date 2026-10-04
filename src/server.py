@@ -81,7 +81,7 @@ def _is_charging_allowed(cp_id: str) -> bool:
     
     stop       → always False.
     charge_now → always True.
-    auto       → True only during peak windows (periods with limit > 0).
+    auto       → True (level chosen by the Auto controller).
     """
     config = _get_schedule(cp_id)
     mode = config.get("mode", "charge_now")
@@ -89,19 +89,7 @@ def _is_charging_allowed(cp_id: str) -> bool:
         return False
     if mode == "charge_now":
         return True
-    # auto: check if current hour (in CP's timezone) has a non-zero limit
-    tz = _get_tz(cp_id)
-    now = datetime.now(tz)
-    periods = config.get("periods", DEFAULT_SCHEDULE["periods"])
-    # Find the active period: the one with the largest start_hour <= current hour
-    active = None
-    for p in sorted(periods, key=lambda x: x["start_hour"]):
-        if p["start_hour"] <= now.hour:
-            active = p
-    if active is None:
-        # Before first period: allow if any period has limit > 0
-        return any(p.get("limit_watts", 0) > 0 for p in periods)
-    return active.get("limit_watts", 0) > 0
+    return True  # auto: the controller picks the level (possibly OFF)
 
 # ---------------------------------------------------------------------------
 # Safe env helpers
@@ -1197,11 +1185,13 @@ async def handle_debug(request):
         "charge_points": charge_points,
         "recent_events": recent_events[:50],
         "solar_control": {
-            "grid_import_threshold_w": SOLAR_GRID_IMPORT_THRESHOLD,
+            "grid_import_threshold_w": AUTO_DEADBAND_W,
             "states": {
                 cp_id: {
                     "target_watts": state.get("throttled_watts"),
                     "direction": state.get("direction"),
+                    "level_a": state.get("level_a"),
+                    "reason": state.get("reason"),
                 }
                 for cp_id, state in _solar_throttle.items()
             },
@@ -1271,48 +1261,23 @@ ESY_THING_NAME = _env_str("ESY_THING_NAME", "gormantec-battery1")
 ESY_TELEMETRY_TOPIC = f"$iothub/twin/PATCH/properties/reported/{ESY_THING_NAME}"
 
 # Solar Smart constants
-SOLAR_GRID_IMPORT_THRESHOLD = 500     # Watts — above this, throttle down
-SOLAR_RAMP_STEP = 480                 # Watts per step
-SOLAR_MIN_WATTS = 1440                # Floor — never go below this
-SOLAR_DOWN_CHECKS = 4                 # 2min @ 30s intervals → ramp down
-SOLAR_UP_CHECKS = 20                  # 10min @ 30s intervals → ramp up
-SOLAR_UP_BATTERY_SOC_MIN = 30        # Battery SOC must be > this to ramp up
-SOLAR_UP_PV_MIN = 500                # PV must be > this to ramp up
 SOLAR_CHECK_INTERVAL = 30            # Seconds between throttle checks
 
 # Per-CP schedule config (persisted to DocumentDB)
 # {cp_id: {mode, peak_start_hour, peak_end_hour, peak_watts, off_peak_watts}}
 _schedule_configs: dict[str, dict] = {}
 
-# Default schedule config
-# Default schedule config — periods map to TxDefaultProfile ChargingSchedulePeriod
-# Each period: {start_hour: 0-23, limit_watts: 0-50000}
-# Periods are relative to charging start (ChargingProfileKindType.relative)
+# Per-charger settings. Auto mode picks OFF/6/8/16/32A from site power;
+# grid import is only allowed inside the off-peak window.
 DEFAULT_SCHEDULE = {
     "mode": "charge_now",
     "timezone": "Australia/Sydney",
-    "periods": [
-        {"start_hour": 0, "limit_watts": 4800.0},
-        {"start_hour": 16, "limit_watts": 1440.0},
-    ],
-    # Shared decision settings to match the SEVR-X1 controller UI
-    "solar_smart": False,
     "off_peak_start_hour": 0,
     "off_peak_end_hour": 6,
-    "evening_start_hour": 17,
-    "overnight_current_amps": 32,
-    "battery_priority_soc": 50,
-    "grid_deadband_w": 150,
-    "minimum_spare_power_w": 500,
-    "buffer_power_w": 500,
-    "pv_power_threshold_w": 1000,
-    "battery_only_max_amps": 24,
-    "override_low_soc_threshold": 15,
-    "override_low_current": 8,
-    "override_high_current": 16,
-    "override_boost_current": 32,
-    "override_solar_boost_threshold_w": 2000,
+    "max_amps": 16,          # cap for Auto (off-peak and solar)
+    "min_battery_soc": 50,   # Auto outside off-peak only runs at/above this %
 }
+AUTO_DEADBAND_W = 150
 
 # Common timezones for UI dropdown
 COMMON_TIMEZONES = sorted([
@@ -1332,31 +1297,6 @@ def _get_tz(cp_id: str) -> ZoneInfo:
         return ZoneInfo(tz_name)
     except Exception:
         return ZoneInfo("UTC")
-
-
-def _validate_periods(periods):
-    """Validate and normalize schedule periods. Returns (ok, normalized_or_error)."""
-    if not periods or not isinstance(periods, list) or len(periods) == 0:
-        return False, "At least one period is required"
-    out = []
-    for p in periods:
-        sh = p.get("start_hour")
-        lw = p.get("limit_watts")
-        if sh is None or not isinstance(sh, (int, float)) or sh < 0 or sh > 23:
-            return False, f"Invalid start_hour: {sh} (must be 0-23)"
-        if lw is None or not isinstance(lw, (int, float)) or lw < 0 or lw > 50000:
-            return False, f"Invalid limit_watts: {lw} (must be 0-50000)"
-        out.append({"start_hour": int(sh), "limit_watts": float(lw)})
-    # Sort by start_hour ascending
-    out.sort(key=lambda p: p["start_hour"])
-    # Deduplicate start_hour
-    seen = set()
-    deduped = []
-    for p in out:
-        if p["start_hour"] not in seen:
-            seen.add(p["start_hour"])
-            deduped.append(p)
-    return True, deduped
 
 
 # ---------------------------------------------------------------------------
@@ -1630,18 +1570,6 @@ def _get_schedule(cp_id: str) -> dict:
 # Solar Smart throttling
 # ---------------------------------------------------------------------------
 
-def _get_period_limit_for_hour(cp_id: str, hour: int) -> float:
-    """Get the configured watt limit for a given hour from the CP's periods."""
-    config = _get_schedule(cp_id)
-    periods = sorted(config.get("periods", DEFAULT_SCHEDULE["periods"]),
-                     key=lambda p: p["start_hour"])
-    active = periods[0]
-    for p in periods:
-        if p["start_hour"] <= hour:
-            active = p
-    return active.get("limit_watts", 4800.0)
-
-
 def _is_off_peak(cp_id: str) -> bool:
     """Check if we're in the off-peak grid window for this CP."""
     config = _get_schedule(cp_id)
@@ -1759,10 +1687,8 @@ def _expected_limit_w(cp_id: str) -> float | None:
         return 0.0
     if mode == "charge_now":
         return CHARGE_NOW_WATTS
-    hour = datetime.now(_get_tz(cp_id)).hour
-    if cp_id in _solar_throttle and not _is_off_peak(cp_id):
-        return float(_solar_throttle[cp_id]["throttled_watts"])
-    return float(_get_period_limit_for_hour(cp_id, hour))
+    st = _solar_throttle.get(cp_id)
+    return float(st["throttled_watts"]) if st and st.get("initialised") else None
 
 
 def _measured_voltage(cp_id: str) -> float:
@@ -1786,8 +1712,8 @@ async def _reapply_mode_profile(cp_id: str, cp, reason: str):
     elif mode == "charge_now":
         periods = [(0, CHARGE_NOW_WATTS)]
     else:
-        periods = [(p["start_hour"] * 3600, p["limit_watts"])
-                   for p in config.get("periods", DEFAULT_SCHEDULE["periods"])]
+        _solar_throttle.pop(cp_id, None)
+        periods = [(0, _auto_decide(cp_id)[0])]
     clear = await _clear_all_profiles(cp)
     kwargs = {}
     if mode == "auto":
@@ -1811,7 +1737,8 @@ async def _reapply_mode_profile(cp_id: str, cp, reason: str):
         ),
     ))
     status = str(getattr(result, "status", result))
-    _solar_throttle.pop(cp_id, None)
+    if mode != "auto":
+        _solar_throttle.pop(cp_id, None)
     _record_event(cp_id, "profile_sync", f"{reason}: mode={mode} clear={clear} set={status}")
     _LOGGER.info("Profile sync for %s (%s): mode=%s clear=%s set=%s",
                  cp_id, reason, mode, clear, status)
@@ -1970,18 +1897,109 @@ async def handle_profile_check(request):
     return web.json_response(out)
 
 
-async def _apply_throttled_watts(cp_id: str, watts: float):
-    """Send SetChargingProfile with a throttled watt limit."""
+AUTO_LEVELS_A = (6, 8, 16, 32)   # OFF (0) plus these current levels
+AUTO_DOWN_CHECKS = 2             # 60s of grid import before stepping down
+AUTO_UP_CHECKS = 6               # 3min of surplus before stepping up
+AUTO_METRICS_MAX_AGE_S = 180
+
+
+def _snap_level(amps: float) -> int:
+    """Highest allowed current level <= amps (0 = OFF)."""
+    best = 0
+    for lvl in AUTO_LEVELS_A:
+        if lvl <= amps:
+            best = lvl
+    return best
+
+
+def _auto_state(cp_id: str) -> dict:
+    return _solar_throttle.setdefault(cp_id, {
+        "throttled_watts": 0.0, "level_a": 0, "direction": None,
+        "consecutive": 0, "reason": "", "initialised": False,
+    })
+
+
+def _auto_decide(cp_id: str) -> tuple[float, bool]:
+    """Pick the Auto-mode current level. Returns (watts, changed).
+
+    Off-peak: full overnight level. Otherwise never import from the grid:
+    step down when importing, step up only on real surplus (or a battery-backed
+    probe), and go OFF if site metrics are stale.
+    """
+    cfg = _get_schedule(cp_id)
+    st = _auto_state(cp_id)
+    first = not st["initialised"]
+    cur = st["level_a"]
+    volts = _measured_voltage(cp_id)
+    target, reason, immediate = cur, "hold", first
+
+    if _is_off_peak(cp_id):
+        target = _snap_level(cfg.get("max_amps", 16)) or AUTO_LEVELS_A[0]
+        reason, immediate = "off-peak", True
+    else:
+        m = _solar_metrics
+        last = m.get("last_update")
+        age = (datetime.now(timezone.utc) - last).total_seconds() if last else None
+        if age is None or age > AUTO_METRICS_MAX_AGE_S:
+            target, reason, immediate = 0, "site metrics stale", True
+        else:
+            imp = m.get("grid_import") or 0
+            exp = m.get("grid_export") or 0
+            soc = m.get("battery_soc")
+            cap = _snap_level(cfg.get("max_amps", 16)) or AUTO_LEVELS_A[0]
+            mv = (_cp_state.get(cp_id, {}).get("meter_values", {}) or {}).get("1") or {}
+            try:
+                ev_w = max(0.0, float(mv.get("power") or 0))
+            except (TypeError, ValueError):
+                ev_w = 0.0
+            fit = min(cap, _snap_level((ev_w + exp - imp - AUTO_DEADBAND_W) / volts))
+            lower = max([l for l in (0,) + AUTO_LEVELS_A if l < cur], default=0)
+            if soc is not None and soc < cfg.get("min_battery_soc", 50):
+                candidate, direction, need, why = 0, "down", 1, f"battery {soc}% below minimum"
+            elif cur > cap:
+                candidate, direction, need, why = cap, "down", 1, "above max amps"
+            elif imp > AUTO_DEADBAND_W:
+                candidate = min(fit, lower) if fit < cur else lower
+                direction, need, why = "down", AUTO_DOWN_CHECKS, f"grid import {imp}W"
+            elif fit > cur:
+                candidate, direction, need, why = fit, "up", AUTO_UP_CHECKS, f"surplus {fit * volts:.0f}W"
+            elif cur < cap and soc is not None:
+                # No import at this level: battery is covering it, probe one step up.
+                candidate = min(l for l in AUTO_LEVELS_A if l > cur)
+                direction, need, why = "up", AUTO_UP_CHECKS, f"no grid import, battery {soc}%"
+            else:
+                candidate, direction, need, why = cur, None, 0, "hold"
+            if candidate == cur:
+                st["direction"], st["consecutive"] = None, 0
+            else:
+                st["consecutive"] = st["consecutive"] + 1 if st["direction"] == direction else 1
+                st["direction"] = direction
+                if first or st["consecutive"] >= need:
+                    target, reason = candidate, why
+                    immediate = True
+
+    st["initialised"] = True
+    if target == cur and not first:
+        return st["throttled_watts"], False
+    if not immediate and not first:
+        return st["throttled_watts"], False
+    st.update(level_a=target, throttled_watts=float(target * DEFAULT_VOLTAGE),
+              direction=None, consecutive=0, reason=reason)
+    return st["throttled_watts"], True
+
+
+async def _apply_throttled_watts(cp_id: str, watts: float, reason: str = ""):
+    """Send SetChargingProfile (id 1, flat) with the chosen Auto limit."""
     cp = _active_cps.get(cp_id)
     if not cp:
         return
     from ocpp.v16.datatypes import ChargingProfile, ChargingSchedule, ChargingSchedulePeriod
-    from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType, ChargingRateUnitType
+    from ocpp.v16.enums import ChargingProfilePurposeType, ChargingProfileKindType
     try:
-        await cp.call(SetChargingProfile(
+        result = await cp.call(SetChargingProfile(
             connector_id=0,
             cs_charging_profiles=ChargingProfile(
-                charging_profile_id=1, stack_level=0,
+                charging_profile_id=PROFILE_ID, stack_level=0,
                 charging_profile_purpose=ChargingProfilePurposeType.tx_default_profile,
                 charging_profile_kind=ChargingProfileKindType.recurring,
                 recurrency_kind=RecurrencyKind.daily,
@@ -1993,18 +2011,18 @@ async def _apply_throttled_watts(cp_id: str, watts: float):
                 ),
             ),
         ))
-        _LOGGER.info("Solar Smart: %s throttled to %.0fW", cp_id, watts)
-        _record_event(cp_id, "solar_throttle", f"throttled to {watts:.0f}W")
+        status = str(getattr(result, "status", result))
+        msg = f"Auto level {watts / DEFAULT_VOLTAGE:.0f}A ({watts:.0f}W) — {reason} [{status}]"
+        _LOGGER.info("Auto: %s %s", cp_id, msg)
+        _record_event(cp_id, "solar_throttle", msg)
     except Exception as e:
-        _LOGGER.warning("Solar Smart: SetChargingProfile failed for %s: %s", cp_id, e)
+        _LOGGER.warning("Auto: SetChargingProfile failed for %s: %s", cp_id, e)
 
 
 async def _solar_smart_tick():
-    """Periodic check: adjust charge rates based on grid import/export."""
+    """Periodic Auto-mode check: choose OFF/6/8/16/32A from site power."""
     for cp_id, config in list(_schedule_configs.items()):
-        mode = config.get("mode", "charge_now")
-        solar_smart = config.get("solar_smart", False)
-        if mode != "auto":
+        if config.get("mode", "charge_now") != "auto":
             continue
         cp = _active_cps.get(cp_id)
         if not cp:
@@ -2013,73 +2031,11 @@ async def _solar_smart_tick():
         window_key = _off_peak_window_key(cp_id)
         if window_key:
             await _try_auto_off_peak_start(cp_id, cp, window_key)
-        if not solar_smart:
-            continue
 
-        # Off-peak window: reset to configured period rate, no throttling
-        if _is_off_peak(cp_id):
-            tz = _get_tz(cp_id)
-            hour = datetime.now(tz).hour
-            if cp_id in _solar_throttle:
-                try:
-                    await _reapply_mode_profile(cp_id, cp, "off-peak: restore full schedule")
-                except Exception as e:
-                    _LOGGER.warning("Solar Smart: off-peak restore failed for %s: %s", cp_id, e)
-                else:
-                    asyncio.create_task(_verify_profile_later(cp_id, "off-peak restore"))
-            continue
-
-        grid_import = _solar_metrics.get("grid_import", 0)
-        battery_soc = _solar_metrics.get("battery_soc")
-        pv_power = _solar_metrics.get("pv_power", 0)
-
-        tz = _get_tz(cp_id)
-        hour = datetime.now(tz).hour
-        configured_watts = _get_period_limit_for_hour(cp_id, hour)
-
-        throttle = _solar_throttle.get(cp_id, {
-            "throttled_watts": configured_watts,
-            "direction": None,
-            "consecutive": 0,
-        })
-        current_watts = throttle["throttled_watts"]
-
-        if grid_import > SOLAR_GRID_IMPORT_THRESHOLD:
-            # Ramp DOWN — too much grid import
-            if throttle.get("direction") == "down":
-                throttle["consecutive"] += 1
-            else:
-                throttle["direction"] = "down"
-                throttle["consecutive"] = 1
-
-            if throttle["consecutive"] >= SOLAR_DOWN_CHECKS:
-                new_watts = max(current_watts - SOLAR_RAMP_STEP, SOLAR_MIN_WATTS)
-                if new_watts < current_watts:
-                    throttle["throttled_watts"] = new_watts
-                    throttle["consecutive"] = 0
-                    await _apply_throttled_watts(cp_id, new_watts)
-        elif (grid_import <= SOLAR_GRID_IMPORT_THRESHOLD
-              and (battery_soc is None or battery_soc > SOLAR_UP_BATTERY_SOC_MIN)
-              and pv_power > SOLAR_UP_PV_MIN):
-            # Ramp UP — grid is fine, solar is abundant, battery healthy
-            if throttle.get("direction") == "up":
-                throttle["consecutive"] += 1
-            else:
-                throttle["direction"] = "up"
-                throttle["consecutive"] = 1
-
-            if throttle["consecutive"] >= SOLAR_UP_CHECKS:
-                new_watts = min(current_watts + SOLAR_RAMP_STEP, configured_watts)
-                if new_watts > current_watts:
-                    throttle["throttled_watts"] = new_watts
-                    throttle["consecutive"] = 0
-                    await _apply_throttled_watts(cp_id, new_watts)
-        else:
-            # Reset direction tracking if neither condition met
-            throttle["direction"] = None
-            throttle["consecutive"] = 0
-
-        _solar_throttle[cp_id] = throttle
+        watts, changed = _auto_decide(cp_id)
+        if changed:
+            await _apply_throttled_watts(cp_id, watts, _auto_state(cp_id)["reason"])
+            asyncio.create_task(_verify_profile_later(cp_id, "auto level change"))
 
 
 async def _solar_smart_loop():
@@ -2092,20 +2048,11 @@ async def _solar_smart_loop():
         await asyncio.sleep(SOLAR_CHECK_INTERVAL)
 
 async def handle_schedule_post(request):
-    """POST /schedule — Set charging mode and TxDefaultProfile periods.
-    
-    Body: {
-        "cp_id": "4b8609",
-        "mode": "stop"|"auto"|"charge_now",
-        "periods": [                          // only for mode="auto"
-            {"start_hour": 0, "limit_watts": 4800},
-            {"start_hour": 16, "limit_watts": 1440}
-        ]
-    }
-    
-    Periods map directly to OCPP ChargingSchedulePeriod:
-      start_period = start_hour * 3600 (seconds from charging start)
-      limit = limit_watts (watts, StarCharge only accepts W not A)
+    """POST /schedule — Set charging mode.
+
+    Body: {"cp_id", "mode": "stop"|"auto"|"charge_now", "timezone"?,
+           "off_peak_start_hour"?, "off_peak_end_hour"?,
+           "max_amps"? (6|8|16|32), "min_battery_soc"? (0-100)}
     """
     try:
         body = await request.json()
@@ -2134,57 +2081,22 @@ async def handle_schedule_post(request):
             else:
                 return web.json_response({"error": f"Invalid timezone: {tz_name}"}, status=400)
 
-        # Solar Smart fields
-        if "solar_smart" in body:
-            config["solar_smart"] = bool(body["solar_smart"])
-        if "off_peak_start_hour" in body:
-            h = int(body["off_peak_start_hour"])
-            if not (0 <= h <= 23):
-                return web.json_response({"error": f"Invalid off_peak_start_hour: {h}"}, status=400)
-            config["off_peak_start_hour"] = h
-        if "off_peak_end_hour" in body:
-            h = int(body["off_peak_end_hour"])
-            if not (0 <= h <= 23):
-                return web.json_response({"error": f"Invalid off_peak_end_hour: {h}"}, status=400)
-            config["off_peak_end_hour"] = h
-        if "evening_start_hour" in body:
-            h = int(body["evening_start_hour"])
-            if not (0 <= h <= 23):
-                return web.json_response({"error": f"Invalid evening_start_hour: {h}"}, status=400)
-            config["evening_start_hour"] = h
-        for key, default, lo, hi in (
-            ("overnight_current_amps", 32, 8, 32),
-            ("battery_priority_soc", 50, 0, 100),
-            ("grid_deadband_w", 150, 0, 5000),
-            ("minimum_spare_power_w", 500, 0, 10000),
-            ("buffer_power_w", 500, 0, 10000),
-            ("pv_power_threshold_w", 1000, 0, 20000),
-            ("battery_only_max_amps", 24, 8, 32),
-            ("override_low_soc_threshold", 15, 0, 100),
-            ("override_low_current", 8, 8, 32),
-            ("override_high_current", 16, 8, 32),
-            ("override_boost_current", 32, 8, 32),
-            ("override_solar_boost_threshold_w", 2000, 0, 20000),
-        ):
+        for key in ("off_peak_start_hour", "off_peak_end_hour"):
             if key in body:
-                value = int(body[key])
-                if not (lo <= value <= hi):
-                    return web.json_response({"error": f"Invalid {key}: {value}"}, status=400)
-                config[key] = value
-
-        # Validate and store periods for auto mode
-        periods = None
-        if mode == "auto":
-            raw_periods = body.get("periods")
-            if raw_periods:
-                ok, result = _validate_periods(raw_periods)
-                if not ok:
-                    return web.json_response({"error": result}, status=400)
-                periods = result
-            else:
-                # Use defaults or existing
-                periods = config.get("periods", DEFAULT_SCHEDULE["periods"])
-            config["periods"] = periods
+                h = int(body[key])
+                if not (0 <= h <= 23):
+                    return web.json_response({"error": f"Invalid {key}: {h}"}, status=400)
+                config[key] = h
+        if "max_amps" in body:
+            amps = int(body["max_amps"])
+            if amps not in AUTO_LEVELS_A:
+                return web.json_response({"error": f"Invalid max_amps: {amps} (use {AUTO_LEVELS_A})"}, status=400)
+            config["max_amps"] = amps
+        if "min_battery_soc" in body:
+            soc = int(body["min_battery_soc"])
+            if not (0 <= soc <= 100):
+                return web.json_response({"error": f"Invalid min_battery_soc: {soc}"}, status=400)
+            config["min_battery_soc"] = soc
 
         _schedule_configs[cp_id] = config
         _schedule_state[cp_id] = {"mode": mode}  # backward compat
@@ -2246,17 +2158,10 @@ async def handle_schedule_post(request):
             _record_event(cp_id, "schedule", "Mode: STOP — charging blocked")
 
         elif mode == "auto":
-            # Build ChargingSchedulePeriod list from config periods
-            # Use Recurring+Daily: periods anchored to midnight, repeat daily
-            cs_periods = []
-            for p in periods:
-                cs_periods.append(ChargingSchedulePeriod(
-                    start_period=p["start_hour"] * 3600,
-                    limit=p["limit_watts"],
-                ))
-            desc = ", ".join(f"{p['start_hour']:02d}:00→{p['limit_watts']:.0f}W" for p in periods)
-            _LOGGER.info("AUTO mode for %s — periods (Recurring+Daily): %s", cp_id, desc)
             _solar_throttle.pop(cp_id, None)
+            auto_w, _ = _auto_decide(cp_id)
+            desc = f"{auto_w / DEFAULT_VOLTAGE:.0f}A ({_auto_state(cp_id)['reason']})"
+            _LOGGER.info("AUTO mode for %s — initial level %s", cp_id, desc)
             await _clear_all_profiles(cp, safe_cp_call)
             await safe_cp_call("SetChargingProfile(auto)", SetChargingProfile(
                 connector_id=0,
@@ -2267,11 +2172,13 @@ async def handle_schedule_post(request):
                     recurrency_kind=RecurrencyKind.daily,
                     charging_schedule=ChargingSchedule(
                         charging_rate_unit=ChargingRateUnitType.watts,
-                        charging_schedule_period=cs_periods,
+                        charging_schedule_period=[
+                            ChargingSchedulePeriod(start_period=0, limit=auto_w),
+                        ],
                     ),
                 ),
             ))
-            _record_event(cp_id, "schedule", f"Mode: AUTO (Recurring+Daily) — {desc}")
+            _record_event(cp_id, "schedule", f"Mode: AUTO — {desc}")
 
         else:  # charge_now
             _LOGGER.info("CHARGE NOW for %s — clearing profile + full power", cp_id)

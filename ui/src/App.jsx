@@ -141,10 +141,6 @@ const STATUS_COLORS = {
   Faulted: '#D13212', Unavailable: '#D13212', Reserved: '#FF9900',
 };
 
-const DEFAULT_PERIODS = [
-  { start_hour: 0, limit_watts: 4800 },
-  { start_hour: 16, limit_watts: 1440 },
-];
 
 const toggleStyle = (active, color) => ({
   background: active ? color : 'transparent', color: active ? '#fff' : '#95a5a6',
@@ -171,24 +167,10 @@ export default function App() {
   const [scheduleMsg, setScheduleMsg] = useState(null);
   const [selectedCpId, setSelectedCpId] = useState(null);
   const [showConfig, setShowConfig] = useState(false);
-  const [editPeriods, setEditPeriods] = useState([...DEFAULT_PERIODS]);
-  const [editTimezone, setEditTimezone] = useState('Australia/Sydney');
-  const [editSolarSmart, setEditSolarSmart] = useState(false);
   const [editOffPeakStart, setEditOffPeakStart] = useState(0);
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
-  const [editEveningStartHour, setEditEveningStartHour] = useState(17);
-  const [editBatteryPrioritySoc, setEditBatteryPrioritySoc] = useState(50);
-  const [editGridDeadbandW, setEditGridDeadbandW] = useState(150);
-  const [editMinimumSpareW, setEditMinimumSpareW] = useState(500);
-  const [editBufferW, setEditBufferW] = useState(500);
-  const [editPvPowerThresholdW, setEditPvPowerThresholdW] = useState(1000);
-  const [editBatteryOnlyMaxAmps, setEditBatteryOnlyMaxAmps] = useState(24);
-  const [editOvernightCurrentAmps, setEditOvernightCurrentAmps] = useState(32);
-  const [editOverrideLowSocThreshold, setEditOverrideLowSocThreshold] = useState(15);
-  const [editOverrideLowCurrent, setEditOverrideLowCurrent] = useState(8);
-  const [editOverrideHighCurrent, setEditOverrideHighCurrent] = useState(16);
-  const [editOverrideBoostCurrent, setEditOverrideBoostCurrent] = useState(32);
-  const [editOverrideSolarBoostThresholdW, setEditOverrideSolarBoostThresholdW] = useState(2000);
+  const [editMaxAmps, setEditMaxAmps] = useState(16);
+  const [editMinBatterySoc, setEditMinBatterySoc] = useState(50);
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
   const [eventFilter, setEventFilter] = useState('all');
@@ -314,23 +296,10 @@ export default function App() {
       cp_id: effectiveCpId,
       mode: currentMode,
       timezone: editTimezone,
-      periods: [...editPeriods].sort((a, b) => a.start_hour - b.start_hour),
-      solar_smart: editSolarSmart,
       off_peak_start_hour: editOffPeakStart,
       off_peak_end_hour: editOffPeakEnd,
-      evening_start_hour: editEveningStartHour,
-      battery_priority_soc: editBatteryPrioritySoc,
-      grid_deadband_w: editGridDeadbandW,
-      minimum_spare_power_w: editMinimumSpareW,
-      buffer_power_w: editBufferW,
-      pv_power_threshold_w: editPvPowerThresholdW,
-      battery_only_max_amps: editBatteryOnlyMaxAmps,
-      overnight_current_amps: editOvernightCurrentAmps,
-      override_low_soc_threshold: editOverrideLowSocThreshold,
-      override_low_current: editOverrideLowCurrent,
-      override_high_current: editOverrideHighCurrent,
-      override_boost_current: editOverrideBoostCurrent,
-      override_solar_boost_threshold_w: editOverrideSolarBoostThresholdW,
+      max_amps: editMaxAmps,
+      min_battery_soc: editMinBatterySoc,
     };
 
     setSchedulePending(true);
@@ -379,17 +348,8 @@ export default function App() {
 
   const scheduleConfig = schedule[effectiveCpId] || {};
   const scheduleMode = scheduleConfig.mode || 'charge_now';
-  const schedulePeriods = [...(scheduleConfig.periods || DEFAULT_PERIODS)]
-    .sort((a, b) => a.start_hour - b.start_hour);
-  const currentHour = effectiveCpId ? getNow() : 0;
-  let activePeriod = null;
-  for (const period of schedulePeriods) {
-    if (period.start_hour <= currentHour) activePeriod = period;
-  }
   const solarControl = data?.solar_control || {};
   const solarControlState = solarControl.states?.[effectiveCpId];
-  const requestedSolarLimit = solarControlState?.target_watts ?? data?.solar_throttle?.[effectiveCpId];
-  const hasSolarLimit = requestedSolarLimit != null && Number.isFinite(Number(requestedSolarLimit));
   const powerIsStale = powerSummary.watts != null
     && (powerSummary.fromHistory || readingIsStale(powerSummary.lastReportedAt));
   const solarTelemetryIsStale = readingIsStale(solar.last_update);
@@ -397,19 +357,14 @@ export default function App() {
   let powerControlReason = 'No charger power-control target is currently available.';
   if (scheduleMode === 'stop') {
     powerControlReason = 'STOP mode blocks charging and requests a stop for any active session.';
-  } else if (scheduleMode === 'auto' && activePeriod?.limit_watts <= 0) {
-    powerControlReason = 'The active AUTO schedule window blocks charging.';
-  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart && solarControlState?.direction === 'down') {
-    const threshold = Number(solarControl.grid_import_threshold_w);
-    powerControlReason = !solarTelemetryIsStale && Number.isFinite(threshold) && Number(solar.grid_import) > threshold
-      ? `Grid import is ${formatPower(Number(solar.grid_import))}, above ${formatPower(threshold)}; Solar Smart is reducing its requested limit.`
-      : 'Solar Smart last reported a downward limit adjustment; current conditions may have changed.';
-  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart && solarControlState?.direction === 'up') {
-    powerControlReason = 'Solar Smart is increasing its requested limit as conditions allow.';
-  } else if (scheduleMode === 'auto' && scheduleConfig.solar_smart) {
-    powerControlReason = 'Solar Smart is enabled; no limit ramp is currently reported.';
-  } else if (scheduleMode === 'auto' && activePeriod) {
-    powerControlReason = `The active AUTO window allows up to ${formatPower(activePeriod.limit_watts)}.`;
+  } else if (scheduleMode === 'auto') {
+    const imp = Number(solar.grid_import);
+    powerControlReason = solarControlState?.reason
+      ? `AUTO chose ${solarControlState.level_a ?? 0}A: ${solarControlState.reason}.`
+      : 'AUTO is waiting for its first level decision.';
+    if (!solarTelemetryIsStale && Number.isFinite(imp) && imp > 0 && solarControlState?.reason?.startsWith('grid import')) {
+      powerControlReason += ` Grid import is ${formatPower(imp)}.`;
+    }
   } else if (scheduleMode === 'charge_now') {
     powerControlReason = 'CHARGE NOW removes the schedule limit; the charger and vehicle can still draw less.';
   }
@@ -509,27 +464,13 @@ export default function App() {
               </div>
               <button className="btn btn-secondary icon-only"
                 style={{padding: '6px 10px', fontSize: 16, lineHeight: 1, flexShrink: 0}}
-                disabled={schedulePending || !selectedCp?.connected} title="Configure schedule periods"
+                disabled={schedulePending || !selectedCp?.connected} title="Configure Auto settings"
                 onClick={() => {
                   const cfg = schedule[effectiveCpId] || {};
-                  setEditPeriods(cfg.periods ? [...cfg.periods] : [...DEFAULT_PERIODS]);
-                  setEditTimezone(cfg.timezone || 'Australia/Sydney');
-                  setEditSolarSmart(cfg.solar_smart || false);
                   setEditOffPeakStart(cfg.off_peak_start_hour ?? 0);
                   setEditOffPeakEnd(cfg.off_peak_end_hour ?? 6);
-                  setEditEveningStartHour(cfg.evening_start_hour ?? 17);
-                  setEditBatteryPrioritySoc(cfg.battery_priority_soc ?? 50);
-                  setEditGridDeadbandW(cfg.grid_deadband_w ?? 150);
-                  setEditMinimumSpareW(cfg.minimum_spare_power_w ?? 500);
-                  setEditBufferW(cfg.buffer_power_w ?? 500);
-                  setEditPvPowerThresholdW(cfg.pv_power_threshold_w ?? 1000);
-                  setEditBatteryOnlyMaxAmps(cfg.battery_only_max_amps ?? 24);
-                  setEditOvernightCurrentAmps(cfg.overnight_current_amps ?? 32);
-                  setEditOverrideLowSocThreshold(cfg.override_low_soc_threshold ?? 15);
-                  setEditOverrideLowCurrent(cfg.override_low_current ?? 8);
-                  setEditOverrideHighCurrent(cfg.override_high_current ?? 16);
-                  setEditOverrideBoostCurrent(cfg.override_boost_current ?? 32);
-                  setEditOverrideSolarBoostThresholdW(cfg.override_solar_boost_threshold_w ?? 2000);
+                  setEditMaxAmps(cfg.max_amps ?? 16);
+                  setEditMinBatterySoc(cfg.min_battery_soc ?? 50);
                   setShowConfig(true);
                 }}>⚙</button>
             </div>
@@ -546,15 +487,11 @@ export default function App() {
                   </>); })()}
                 </div>
                 <div className="hint" style={{ fontSize: 12, color: '#95a5a6', marginTop: 8 }}>
-                  <strong>STOP:</strong> block all | <strong>AUTO:</strong> time-of-day schedule | <strong>CHARGE NOW:</strong> full power
-                  {(() => { const cfg = schedule[effectiveCpId] || {}; const periods = cfg.mode === 'auto' ? (cfg.periods || DEFAULT_PERIODS) : null; return periods ? ' - ' + periods.map(p => p.start_hour + ':00→' + p.limit_watts + 'W').join(', ') : ''; })()}
+                  <strong>STOP:</strong> block all | <strong>AUTO:</strong> solar/battery, grid only off-peak | <strong>CHARGE NOW:</strong> full power
                 </div>
                 <div className="power-context">
                   <strong>Why this power?</strong>
                   <span>{powerControlReason}</span>
-                  {scheduleConfig.solar_smart && hasSolarLimit && (
-                    <span>Latest Solar Smart limit request: {formatPower(Number(requestedSolarLimit))}. This is a bridge target, not confirmation the charger accepted it.</span>
-                  )}
                   <span>{observedPower}</span>
                 </div>
               </>)}
@@ -752,18 +689,16 @@ export default function App() {
             <div className="card-body">
               {!effectiveCpId ? <div className="empty-state"><p>Select a charge point to view rules.</p></div> : (() => {
                 const cfg = schedule[effectiveCpId] || {}; const mode = cfg.mode || 'charge_now';
-                const periods = cfg.periods || DEFAULT_PERIODS; const sortedPeriods = [...periods].sort((a, b) => a.start_hour - b.start_hour);
-                const tz = cfg.timezone || 'Australia/Sydney'; const currentHour = getNow();
-                let activeIdx = sortedPeriods.length - 1;
-                for (let i = 0; i < sortedPeriods.length; i++) { if (sortedPeriods[i].start_hour <= currentHour) activeIdx = i; }
+                const tz = cfg.timezone || 'Australia/Sydney';
                 return (<>
                   {mode === 'stop' && <div className="decision-reason override-notice"><strong>🛑 STOP:</strong> All charging blocked. New sessions rejected.</div>}
                   {mode === 'charge_now' && <div className="decision-reason"><strong>⚡ CHARGE NOW:</strong> Full power mode is active. Schedule limits are bypassed.</div>}
-                  {mode === 'auto' && <div className="decision-reason"><strong>⏱ AUTO:</strong> Time-of-day schedule ({tz})<div className="rules-detail-text">Current hour: {currentHour}:00 — active period limit is {sortedPeriods[activeIdx]?.limit_watts || '?'}W.</div></div>}
-                  <ul className="rules-list rules-list-ocpp">
-                    {sortedPeriods.map((p, i) => { const endHour = i < sortedPeriods.length - 1 ? sortedPeriods[i + 1].start_hour : 24; const isActive = mode === 'auto' && i === activeIdx; return (<li key={i} className={isActive ? 'active' : ''}><strong>{String(p.start_hour).padStart(2, '0')}:00–{String(endHour).padStart(2, '0')}:00:</strong> {p.limit_watts > 0 ? p.limit_watts + 'W' : 'BLOCKED'}{isActive ? ' ← active' : ''}</li>); })}
-                  </ul>
-                  {cfg.solar_smart && <div className="hint rules-hint">☀️ <strong>Solar Smart:</strong> Active — dynamically throttles in peak hours based on grid import/export.{cfg.off_peak_start_hour != null ? ' Off-peak: ' + cfg.off_peak_start_hour + ':00–' + cfg.off_peak_end_hour + ':00.' : ''}</div>}
+                  {mode === 'auto' && <div className="decision-reason"><strong>⏱ AUTO:</strong> OFF / 6A / 8A / 16A / 32A ({tz})
+                    <ul className="rules-list rules-list-ocpp">
+                      <li><strong>{String(cfg.off_peak_start_hour ?? 0).padStart(2, '0')}:00–{String(cfg.off_peak_end_hour ?? 6).padStart(2, '0')}:00:</strong> off-peak, charge at {cfg.max_amps ?? 16}A (grid allowed)</li>
+                      <li><strong>Otherwise:</strong> follow solar/battery surplus up to {cfg.max_amps ?? 16}A, never import from grid</li>
+                      <li><strong>Battery below {cfg.min_battery_soc ?? 50}%:</strong> OFF outside off-peak</li>
+                    </ul></div>}
                 </>);
               })()}
             </div>
@@ -825,56 +760,15 @@ export default function App() {
                     {(timezones.length > 0 ? timezones : ['Australia/Sydney', 'UTC']).map(tz => (<option key={tz} value={tz}>{tz}</option>))}
                   </select>
                 </div>
-                <div className="ocpp-modal-panel">
-                  <label style={{display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginBottom: 12}}>
-                    <input type="checkbox" checked={editSolarSmart} onChange={(e) => setEditSolarSmart(e.target.checked)} style={{width: 18, height: 18, cursor: 'pointer'}} />
-                    <span style={{fontWeight: 600, fontSize: 14}}>☀️ Solar Smart</span>
-                  </label>
-                  <p className="ocpp-help-text" style={{marginBottom: 10}}>Dynamically throttle charging based on solar/grid balance.</p>
-                  {editSolarSmart && (<div style={{display: 'flex', gap: 16}}>
-                    <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak Start</label><input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value) || 0)} className="ocpp-input ocpp-input-sm" /></div>
-                    <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak End</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value) || 0)} className="ocpp-input ocpp-input-sm" /></div>
-                  </div>)}
-                </div>
-
                 <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Evening Start Hour</label><input type="number" min={0} max={23} value={editEveningStartHour} onChange={(e) => setEditEveningStartHour(parseInt(e.target.value, 10) || 17)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Overnight Current A</label><input type="number" min={8} max={32} value={editOvernightCurrentAmps} onChange={(e) => setEditOvernightCurrentAmps(parseInt(e.target.value, 10) || 32)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak Start (hour)</label><input type="number" min={0} max={23} value={editOffPeakStart} onChange={(e) => setEditOffPeakStart(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Off-Peak End (hour)</label><input type="number" min={0} max={23} value={editOffPeakEnd} onChange={(e) => setEditOffPeakEnd(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
                 </div>
                 <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Battery Priority SOC %</label><input type="number" min={0} max={100} value={editBatteryPrioritySoc} onChange={(e) => setEditBatteryPrioritySoc(parseInt(e.target.value, 10) || 50)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Grid Deadband W</label><input type="number" min={0} max={5000} value={editGridDeadbandW} onChange={(e) => setEditGridDeadbandW(parseInt(e.target.value, 10) || 150)} className="ocpp-input ocpp-input-sm" /></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Max Current</label><select value={editMaxAmps} onChange={(e) => setEditMaxAmps(parseInt(e.target.value, 10))} className="ocpp-input ocpp-input-sm">{[6, 8, 16, 32].map(a => <option key={a} value={a}>{a}A</option>)}</select></div>
+                  <div style={{flex: 1}}><label className="ocpp-small-label">Min Battery % (outside off-peak)</label><input type="number" min={0} max={100} value={editMinBatterySoc} onChange={(e) => setEditMinBatterySoc(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" /></div>
                 </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Minimum Spare W</label><input type="number" min={0} max={10000} value={editMinimumSpareW} onChange={(e) => setEditMinimumSpareW(parseInt(e.target.value, 10) || 500)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Buffer W</label><input type="number" min={0} max={10000} value={editBufferW} onChange={(e) => setEditBufferW(parseInt(e.target.value, 10) || 500)} className="ocpp-input ocpp-input-sm" /></div>
-                </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">PV Threshold W</label><input type="number" min={0} max={20000} value={editPvPowerThresholdW} onChange={(e) => setEditPvPowerThresholdW(parseInt(e.target.value, 10) || 1000)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Battery-Only Max A</label><input type="number" min={8} max={32} value={editBatteryOnlyMaxAmps} onChange={(e) => setEditBatteryOnlyMaxAmps(parseInt(e.target.value, 10) || 24)} className="ocpp-input ocpp-input-sm" /></div>
-                </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Low SOC %</label><input type="number" min={0} max={100} value={editOverrideLowSocThreshold} onChange={(e) => setEditOverrideLowSocThreshold(parseInt(e.target.value, 10) || 15)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Solar Boost W</label><input type="number" min={0} max={20000} value={editOverrideSolarBoostThresholdW} onChange={(e) => setEditOverrideSolarBoostThresholdW(parseInt(e.target.value, 10) || 2000)} className="ocpp-input ocpp-input-sm" /></div>
-                </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Low A</label><input type="number" min={8} max={32} value={editOverrideLowCurrent} onChange={(e) => setEditOverrideLowCurrent(parseInt(e.target.value, 10) || 8)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Override High A</label><input type="number" min={8} max={32} value={editOverrideHighCurrent} onChange={(e) => setEditOverrideHighCurrent(parseInt(e.target.value, 10) || 16)} className="ocpp-input ocpp-input-sm" /></div>
-                </div>
-                <div className="ocpp-period-row">
-                  <div style={{flex: 1}}><label className="ocpp-small-label">Override Boost A</label><input type="number" min={8} max={32} value={editOverrideBoostCurrent} onChange={(e) => setEditOverrideBoostCurrent(parseInt(e.target.value, 10) || 32)} className="ocpp-input ocpp-input-sm" /></div>
-                  <div style={{flex: 1}}></div>
-                </div>
-
-                <p className="hint ocpp-help-text" style={{marginBottom: 16, fontSize: 13}}>Each period sets a power limit starting at a given hour. Schedule repeats <strong>daily</strong>.</p>
-                {editPeriods.map((p, i) => (
-                  <div key={i} className="ocpp-period-row">
-                    <div style={{flex: 1}}><label className="ocpp-small-label">Start Hour</label><input type="number" min={0} max={23} value={p.start_hour} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], start_hour: parseInt(e.target.value) || 0}; setEditPeriods(next); }} className="ocpp-input ocpp-input-sm" /></div>
-                    <div style={{flex: 2}}><label className="ocpp-small-label">Limit (Watts)</label><input type="number" min={0} max={50000} step={100} value={p.limit_watts} onChange={(e) => { const next = [...editPeriods]; next[i] = {...next[i], limit_watts: parseInt(e.target.value) || 0}; setEditPeriods(next); }} className="ocpp-input ocpp-input-sm" /></div>
-                    <button className="btn btn-secondary" style={{padding: '4px 8px', fontSize: 12}} disabled={editPeriods.length <= 1} onClick={() => { if (editPeriods.length > 1) setEditPeriods(editPeriods.filter((_, idx) => idx !== i)); }}>✕</button>
-                  </div>
-                ))}
-                <button className="btn btn-secondary" style={{marginBottom: 16, width: '100%'}} onClick={() => setEditPeriods([...editPeriods, { start_hour: 0, limit_watts: 4800 }])}>+ Add Period</button>
+                <p className="hint ocpp-help-text" style={{marginBottom: 16, fontSize: 13}}>Auto mode picks OFF / 6A / 8A / 16A / 32A (up to Max Current). It only buys grid power during off-peak; otherwise it follows solar and battery surplus.</p>
                 <div style={{display: 'flex', gap: 8}}>
                   <button className="btn btn-secondary" style={{flex: 1}} onClick={() => setShowConfig(false)}>Cancel</button>
                   <button className="btn btn-primary" style={{flex: 1}} disabled={schedulePending} onClick={saveScheduleConfig}>Save</button>
