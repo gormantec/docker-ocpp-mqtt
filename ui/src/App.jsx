@@ -236,7 +236,8 @@ function ChargerPage({ routeCpId }) {
   const effectiveCpId = routeCpId;
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
-  const powerSummary = summarizeChargePower(chargePoints);
+  const powerCps = selectedCp ? [selectedCp] : chargePoints;
+  const powerSummary = summarizeChargePower(powerCps);
   const totalPower = powerSummary.watts || 0;
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
@@ -373,6 +374,18 @@ function ChargerPage({ routeCpId }) {
   const scheduleMode = scheduleConfig.mode || 'charge_now';
   const solarControl = data?.solar_control || {};
   const solarControlState = solarControl.states?.[effectiveCpId];
+  const isChargerActivelyCharging = powerCps.some(cp =>
+    Object.values(cp?.physical_status || {}).some(status => String(status).toLowerCase() === 'charging')
+  );
+  const chargingPowerForcedOff = scheduleMode === 'stop'
+    || (scheduleMode === 'auto' && Number(solarControlState?.level_a) === 0);
+  const chargingPowerDisplay = chargingPowerForcedOff
+    ? 'OFF'
+    : !isChargerActivelyCharging
+      ? '0W'
+      : powerSummary.watts == null
+        ? '—'
+        : formatPower(totalPower);
   const powerIsStale = powerSummary.watts != null
     && (powerSummary.fromHistory || readingIsStale(powerSummary.lastReportedAt));
   const solarTelemetryIsStale = readingIsStale(solar.last_update);
@@ -421,7 +434,7 @@ function ChargerPage({ routeCpId }) {
           <div className="summary-cards">
             <div className="summary-card">
               <span className="tile-age">{tileAge(powerSummary.lastReportedAt, 30)}</span>
-              <div className={'summary-value' + (powerSummary.watts != null && totalPower > 0 && !powerIsStale ? ' text-green' : '')}>{powerSummary.watts != null ? formatPower(totalPower) : '—'}</div>
+              <div className={'summary-value' + (!chargingPowerForcedOff && isChargerActivelyCharging && totalPower > 0 && !powerIsStale ? ' text-green' : '')}>{chargingPowerDisplay}</div>
               <div className="summary-label">Charging Power</div>
             </div>
             <div className="summary-card">
