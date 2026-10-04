@@ -119,6 +119,13 @@ const formatReadingAge = (timestamp) => {
   return `${Math.floor(elapsedSeconds / 60)}m ago`;
 };
 
+const formatSiteAge = (timestamp) => {
+  const timestampMs = Date.parse(timestamp || '');
+  if (!Number.isFinite(timestampMs)) return '';
+  const minutes = Math.floor((Date.now() - timestampMs) / 60000);
+  return minutes >= 3 ? `${minutes}min ago` : '';
+};
+
 const readingIsStale = (timestamp) => {
   const timestampMs = Date.parse(timestamp || '');
   return !Number.isFinite(timestampMs)
@@ -407,13 +414,13 @@ export default function App() {
               </div>
             </div>
             <div className="summary-card">
-              <div className={'summary-value' + (solarTelemetryIsStale ? '' : solar.grid_import > 0 ? ' text-red' : ' text-green')}>
-                {solarTelemetryIsStale ? '—' : formatPower(solar.grid_import || 0)}
+              <div className={'summary-value' + (solar.grid_import > 0 ? ' text-red' : ' text-green')}>
+                {solar.last_update ? formatPower(solar.grid_import || 0) : '—'}
               </div>
               <div className="summary-label">
                 Grid Import
                 <span className={'summary-subtext' + (solarTelemetryIsStale ? ' is-stale' : '')}>
-                  {solar.last_update ? `Site meter · ${formatReadingAge(solar.last_update)}` : 'No site meter update'}
+                  {formatSiteAge(solar.last_update)}
                 </span>
               </div>
             </div>
@@ -431,14 +438,14 @@ export default function App() {
               </div>
             </div>
             <div className="summary-card">
-              <div className={'summary-value' + (!solarTelemetryIsStale && solar.grid_export > 2000 ? ' text-green' : '')}>
-                {solarTelemetryIsStale ? '—' : formatPower(solar.grid_export || 0)}
+              <div className={'summary-value' + (solar.grid_export > 2000 ? ' text-green' : '')}>
+                {solar.last_update ? formatPower(solar.grid_export || 0) : '—'}
               </div>
               <div className="summary-label">Grid Export</div>
             </div>
             <div className="summary-card">
-              <div className={'summary-value' + (!solarTelemetryIsStale && solar.battery_soc > 50 ? ' text-green' : !solarTelemetryIsStale && solar.battery_soc <= 50 ? ' text-warn' : '')}>
-                {solarTelemetryIsStale || solar.battery_soc == null ? '—' : `${solar.battery_soc}%`}
+              <div className={'summary-value' + (solar.battery_soc > 50 ? ' text-green' : solar.battery_soc <= 50 ? ' text-warn' : '')}>
+                {solar.battery_soc == null ? '—' : `${solar.battery_soc}%`}
               </div>
               <div className="summary-label">Home Battery SOC</div>
             </div>

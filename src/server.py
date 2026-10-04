@@ -539,11 +539,14 @@ class MqttChargePoint(BaseChargePoint):
     def __init__(self, cp_id: str, connection):
         super().__init__(cp_id, connection)
         _record_event(cp_id, "connected", "Charge point connected")
+        previous = _cp_state.get(cp_id) or {}
         _cp_state[cp_id] = {
-            "id": cp_id, "connected": True, "status": "unknown",
-            "connector_id": None, "last_event": datetime.now(timezone.utc).isoformat(),
-            "connectors": {},  # per-connector -> status
-            "meter_values": {},  # per-connector -> {power, energy, timestamp}
+            "id": cp_id, "connected": True,
+            "status": previous.get("status", "unknown"),
+            "connector_id": previous.get("connector_id"),
+            "last_event": datetime.now(timezone.utc).isoformat(),
+            "connectors": dict(previous.get("connectors") or {}),  # per-connector -> status
+            "meter_values": dict(previous.get("meter_values") or {}),  # last known readings
         }
         _LOGGER.info("Charge point connected: %s", cp_id)
 
@@ -650,6 +653,7 @@ class MqttChargePoint(BaseChargePoint):
             _cp_state[cp_id]["connectors"][conn_key] = status
             if connector_id is not None:
                 _cp_state[cp_id]["connector_id"] = connector_id
+            await _docdb_save_cp_state(cp_id, force=True)
 
         session = None
         try:
@@ -860,6 +864,7 @@ class MqttChargePoint(BaseChargePoint):
             ):
                 await _persist_charge_session(session)
 
+        await _docdb_save_cp_state(self.id)
         payload = {"connector_id": connector_id, "meter_value": meter_value}
         await _mqtt_publish(_cp_topic(self.id, "meter_values"), payload)
 
@@ -1139,6 +1144,7 @@ async def mqtt_listener():
                         _solar_metrics["grid_export"],
                         _solar_metrics["load_power"],
                     )
+                    await _docdb_save_metrics()
                 except Exception:
                     pass
 
@@ -1528,6 +1534,89 @@ async def _docdb_save_schedule(cp_id: str):
     ok, _ = await _docdb_request("PUT", f"{DOCDB_DB}/{doc['_id']}", doc)
     if ok:
         _LOGGER.info("Saved schedule for %s to DocDB: mode=%s", cp_id, config.get("mode"))
+
+
+_metrics_last_saved = 0.0
+METRICS_SAVE_INTERVAL_S = 30
+
+
+async def _docdb_save_metrics(force: bool = False):
+    """Persist the last known site metrics (throttled) so restarts keep them."""
+    global _metrics_last_saved
+    if not DOCDB_ENABLED or not _solar_metrics.get("last_update"):
+        return
+    now = time.monotonic()
+    if not force and now - _metrics_last_saved < METRICS_SAVE_INTERVAL_S:
+        return
+    _metrics_last_saved = now
+    doc = {"_id": "site:metrics", **{k: v for k, v in _solar_metrics.items() if k != "last_update"},
+           "last_update": _solar_metrics["last_update"].isoformat()}
+    await _docdb_put_document(doc)
+
+
+_cp_state_last_saved: dict = {}
+
+
+async def _docdb_save_cp_state(cp_id: str, force: bool = False):
+    """Persist last known connector status and meter readings (throttled)."""
+    cp = _cp_state.get(cp_id)
+    if not DOCDB_ENABLED or not cp:
+        return
+    now = time.monotonic()
+    if not force and now - _cp_state_last_saved.get(cp_id, 0.0) < METRICS_SAVE_INTERVAL_S:
+        return
+    _cp_state_last_saved[cp_id] = now
+    await _docdb_put_document({
+        "_id": f"cpstate:{cp_id}",
+        "cp_id": cp_id,
+        "status": cp.get("status"),
+        "connector_id": cp.get("connector_id"),
+        "connectors": cp.get("connectors") or {},
+        "meter_values": cp.get("meter_values") or {},
+        "last_event": cp.get("last_event"),
+    })
+
+
+async def _docdb_load_cp_states():
+    """Restore last known charger state so tiles are not blank after a restart."""
+    if not DOCDB_ENABLED:
+        return
+    ok, data = await _docdb_request("GET", f"{DOCDB_DB}/_all_docs?include_docs=true")
+    if not ok:
+        return
+    for row in data.get("rows", []):
+        doc = row.get("doc") or {}
+        if not str(doc.get("_id", "")).startswith("cpstate:") or not doc.get("cp_id"):
+            continue
+        _cp_state.setdefault(doc["cp_id"], {
+            "id": doc["cp_id"], "connected": False,
+            "status": doc.get("status") or "unknown",
+            "connector_id": doc.get("connector_id"),
+            "last_event": doc.get("last_event"),
+            "connectors": doc.get("connectors") or {},
+            "meter_values": doc.get("meter_values") or {},
+        })
+        _LOGGER.info("Restored charger state for %s from DocDB", doc["cp_id"])
+
+
+async def _docdb_load_metrics():
+    """Restore last known site metrics; the original timestamp is kept so age stays honest."""
+    if not DOCDB_ENABLED:
+        return
+    ok, doc = await _docdb_request("GET", _docdb_document_path("site:metrics"))
+    if not ok or not isinstance(doc, dict) or not doc.get("last_update"):
+        return
+    try:
+        last = datetime.fromisoformat(doc["last_update"])
+        if _solar_metrics.get("last_update") and _solar_metrics["last_update"] > last:
+            return
+        for k in ("grid_import", "grid_export", "load_power", "battery_soc", "pv_power"):
+            if k in doc:
+                _solar_metrics[k] = doc[k]
+        _solar_metrics["last_update"] = last
+        _LOGGER.info("Restored site metrics from DocDB (last_update=%s)", doc["last_update"])
+    except Exception:
+        _LOGGER.warning("Could not restore site metrics", exc_info=True)
 
 
 async def _docdb_load_schedules():
@@ -2374,6 +2463,8 @@ async def main():
         await _docdb_ensure_db()
         await _docdb_load_history()
         await _docdb_load_schedules()
+        await _docdb_load_metrics()
+        await _docdb_load_cp_states()
 
     # Start Solar Smart background loop
     asyncio.create_task(_solar_smart_loop())
