@@ -164,7 +164,7 @@ const getEventBadge = (type) => {
   return m[type] || 'badge-info';
 };
 
-export default function App() {
+function ChargerPage({ routeCpId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -172,7 +172,6 @@ export default function App() {
   const [schedule, setSchedule] = useState({});
   const [schedulePending, setSchedulePending] = useState(false);
   const [scheduleMsg, setScheduleMsg] = useState(null);
-  const [selectedCpId, setSelectedCpId] = useState(null);
   const [showConfig, setShowConfig] = useState(false);
   const [editOffPeakStart, setEditOffPeakStart] = useState(0);
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
@@ -219,7 +218,7 @@ export default function App() {
 
   const chargePoints = data?.charge_points || [];
   const connectedCps = chargePoints.filter(cp => cp.connected);
-  const effectiveCpId = selectedCpId || (connectedCps[0]?.id) || (chargePoints[0]?.id) || null;
+  const effectiveCpId = routeCpId;
   const selectedCp = chargePoints.find(cp => cp.id === effectiveCpId) || null;
 
   const powerSummary = summarizeChargePower(chargePoints);
@@ -384,8 +383,9 @@ export default function App() {
     <div className="app">
       <header className="aws-navbar">
         <div className="navbar-brand">
-          <span className="brand-icon">🔌</span><span>IoT Core</span>
-          <span className="brand-divider">|</span><span className="brand-service">OCPP MQTT Bridge</span>
+          <a href={BASE} style={{color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8}}><span className="brand-icon">🔌</span><span>IoT Core</span>
+          <span className="brand-divider">|</span><span className="brand-service">OCPP MQTT Bridge</span></a>
+          <span className="brand-divider">|</span><span className="brand-service">{routeCpId}</span>
         </div>
         {lastRefresh && <span className="navbar-refresh">Updated: {lastRefresh.toLocaleTimeString()}</span>}
       </header>
@@ -462,12 +462,6 @@ export default function App() {
             <div className="card-header">
               <div style={{display: 'flex', alignItems: 'center', gap: 16, flex: 1, minWidth: 0}}>
                 <h3>⏱ Schedule Control</h3>
-                {chargePoints.length > 0 && (
-                  <select value={effectiveCpId || ''} onChange={(e) => setSelectedCpId(e.target.value || null)}
-                    style={{ padding: '4px 8px', background: '#fff', border: '1px solid #D5DBDB', color: '#16191F', borderRadius: 3, fontSize: 13, maxWidth: 200 }}>
-                    {chargePoints.map(cp => (<option key={cp.id} value={cp.id}>{cp.id}{cp.connected ? '' : ' (offline)'}</option>))}
-                  </select>
-                )}
               </div>
               <button className="btn btn-secondary icon-only"
                 style={{padding: '6px 10px', fontSize: 16, lineHeight: 1, flexShrink: 0}}
@@ -788,4 +782,63 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function Home() {
+  const [cps, setCps] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(BASE + 'debug');
+        if (!res.ok) throw new Error('Server unavailable');
+        const json = await res.json();
+        setCps(json.charge_points || []);
+        setError(null);
+      } catch {
+        setError('Connection lost - retrying...');
+      }
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="app">
+      <header className="aws-navbar">
+        <div className="navbar-brand">
+          <span className="brand-icon">🔌</span><span>IoT Core</span>
+          <span className="brand-divider">|</span><span className="brand-service">OCPP MQTT Bridge</span>
+        </div>
+      </header>
+      <main className="main-content">
+        {error && <div className="error-card"><p>{error}</p></div>}
+        {!cps && !error && <div className="loader">Loading chargers...</div>}
+        {cps && cps.length === 0 && <div className="empty-state"><p>No chargers known yet.</p></div>}
+        <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16}}>
+          {(cps || []).map(cp => {
+            const watts = summarizeChargePower([cp]).watts || 0;
+            return (
+              <a key={cp.id} href={BASE + encodeURIComponent(cp.id)}
+                style={{display: 'block', padding: 20, background: '#fff', border: '1px solid #D5DBDB', borderRadius: 6, textDecoration: 'none', color: '#16191F', boxShadow: '0 1px 2px rgba(0,0,0,0.08)'}}>
+                <div style={{fontSize: 20, fontWeight: 600}}>{cp.id}</div>
+                <div style={{marginTop: 8, fontSize: 13, color: cp.connected ? '#1D8102' : '#879596'}}>
+                  ● {cp.connected ? 'Connected' : 'Offline'}{cp.status ? ` · ${cp.status}` : ''}
+                </div>
+                {cp.connected && watts > 0 && <div style={{marginTop: 4, fontSize: 13}}>{formatPower(watts)}</div>}
+              </a>
+            );
+          })}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default function App() {
+  const rel = window.location.pathname.startsWith(BASE) ? window.location.pathname.slice(BASE.length) : window.location.pathname.replace(/^\//, '');
+  const cpId = decodeURIComponent(rel.split('/')[0] || '');
+  return cpId ? <ChargerPage routeCpId={cpId} /> : <Home />;
 }
