@@ -190,6 +190,7 @@ function ChargerPage({ routeCpId }) {
   const [editMaxAmps, setEditMaxAmps] = useState(16);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [editMinBatterySoc, setEditMinBatterySoc] = useState(50);
+  const [editGridDeadbandW, setEditGridDeadbandW] = useState(150);
   const [editRates, setEditRates] = useState({ off_peak_rate: 0.08, peak_rate_summer: 0.46761, peak_rate_other: 0.36960 });
   const [timezones, setTimezones] = useState([]);
   const [graphView, setGraphView] = useState('distribution');
@@ -320,6 +321,7 @@ function ChargerPage({ routeCpId }) {
       off_peak_end_hour: editOffPeakEnd,
       max_amps: editMaxAmps,
       min_battery_soc: editMinBatterySoc,
+      grid_deadband_w: editGridDeadbandW,
       ...editRates,
     };
 
@@ -479,6 +481,7 @@ function ChargerPage({ routeCpId }) {
                   setEditOffPeakEnd(cfg.off_peak_end_hour ?? 6);
                   setEditMaxAmps(cfg.max_amps ?? 16);
                   setEditMinBatterySoc(cfg.min_battery_soc ?? 50);
+                  setEditGridDeadbandW(cfg.grid_deadband_w ?? 150);
                   setEditRates({ off_peak_rate: cfg.off_peak_rate ?? 0.08, peak_rate_summer: cfg.peak_rate_summer ?? 0.46761, peak_rate_other: cfg.peak_rate_other ?? 0.36960 });
                   setShowConfig(true);
                 }}>⚙</button>
@@ -496,13 +499,20 @@ function ChargerPage({ routeCpId }) {
                   </>); })()}
                 </div>
                 <div className="hint" style={{ fontSize: 12, color: '#95a5a6', marginTop: 8 }}>
-                  <strong>STOP:</strong> block all | <strong>AUTO:</strong> solar/battery, grid only off-peak | <strong>CHARGE NOW:</strong> full power
+                  {scheduleMode === 'stop'
+                    ? 'All charging is stopped.'
+                    : scheduleMode === 'auto'
+                      ? `Solar/battery surplus first; grid power allowed only ${String(scheduleConfig.off_peak_start_hour ?? 0).padStart(2, '0')}:00–${String(scheduleConfig.off_peak_end_hour ?? 6).padStart(2, '0')}:00.`
+                      : 'Charging is forced on; power may still be limited by the charger, vehicle or home conditions.'}
                 </div>
-                <div className="power-context">
-                  <strong>Why this power?</strong>
-                  <span>{powerControlReason}</span>
-                  <span>{observedPower}</span>
-                </div>
+                <details className="schedule-details">
+                  <summary>Power details</summary>
+                  <div className="power-context">
+                    <strong>Why this power?</strong>
+                    <span>{powerControlReason}</span>
+                    <span>{observedPower}</span>
+                  </div>
+                </details>
               </>)}
             </div>
           </div>
@@ -703,9 +713,9 @@ function ChargerPage({ routeCpId }) {
                   {mode === 'charge_now' && <div className="decision-reason"><strong>⚡ CHARGE NOW:</strong> Full power mode is active. Schedule limits are bypassed.</div>}
                   {mode === 'auto' && <div className="decision-reason"><strong>⏱ AUTO:</strong> OFF / 6A / 8A / 16A / 32A ({tz})
                     <ul className="rules-list rules-list-ocpp">
-                      <li><strong>{String(cfg.off_peak_start_hour ?? 0).padStart(2, '0')}:00–{String(cfg.off_peak_end_hour ?? 6).padStart(2, '0')}:00:</strong> off-peak, charge at {cfg.max_amps ?? 16}A (grid allowed)</li>
-                      <li><strong>Otherwise:</strong> follow solar/battery surplus up to {cfg.max_amps ?? 16}A, never import from grid</li>
-                      <li><strong>Battery below {cfg.min_battery_soc ?? 50}%:</strong> OFF outside off-peak</li>
+                      <li><strong>{String(cfg.off_peak_start_hour ?? 0).padStart(2, '0')}:00–{String(cfg.off_peak_end_hour ?? 6).padStart(2, '0')}:00:</strong> off-peak, charge at max {cfg.max_amps ?? 16}A (grid allowed)</li>
+                      <li><strong>Otherwise:</strong> avoid sustained grid import above the {cfg.grid_deadband_w ?? 150}W deadband; step down after 1min, step up after 3min of surplus solar/battery</li>
+                      <li><strong>Safety:</strong> OFF if site data is over 3min old or known battery SOC is below {cfg.min_battery_soc ?? 50}%</li>
                     </ul></div>}
                 </>);
               })()}
@@ -776,6 +786,10 @@ function ChargerPage({ routeCpId }) {
                 <div style={{marginBottom: 16}}>
                   <label className="ocpp-field-label">Keep home battery above (%)<InfoTip text="Outside off-peak, Auto stops charging the car if the home battery falls below this level, so the house keeps its reserve." /></label>
                   <input type="number" min={0} max={100} value={editMinBatterySoc} onChange={(e) => setEditMinBatterySoc(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" />
+                </div>
+                <div style={{marginBottom: 16}}>
+                  <label className="ocpp-field-label">Grid deadband (W)<InfoTip text="Small grid import below this threshold is ignored by Auto to avoid reacting to normal measurement noise. Sustained import above it causes Auto to step down." /></label>
+                  <input type="number" min={0} max={5000} value={editGridDeadbandW} onChange={(e) => setEditGridDeadbandW(parseInt(e.target.value, 10) || 0)} className="ocpp-input ocpp-input-sm" />
                 </div>
                 <div style={{marginBottom: 16}}>
                   <label className="ocpp-field-label">Electricity prices ($/kWh, all-in)<InfoTip text="What you pay per kWh including all charges. Used only to estimate charging cost; it doesn't change how charging is controlled. Peak applies outside the off-peak window." /></label>

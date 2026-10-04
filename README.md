@@ -67,73 +67,18 @@ Each charge point (CP) has its own schedule config, persisted to DocumentDB. The
 | Mode | Behavior |
 |------|----------|
 | 🛑 **STOP** | All charging blocked. `RemoteStopTransaction` sent to any active session. New `Authorize` requests rejected. |
-| ⏱ **AUTO** | Time-of-day schedule with configurable periods. Each period defines a watt limit for a starting hour. The active period's `limit_watts` determines whether charging is allowed (limit > 0 = allowed). |
+| ⏱ **AUTO** | Charges at the configured max during off-peak. Outside that window it follows solar/battery surplus, never intentionally importing from the grid. |
 | ⚡ **CHARGE NOW** | Full power — no restrictions. Always allows charging. |
 
-### AUTO Mode - Periods
+### AUTO Mode — level-based solar control
 
-Periods are defined as `{start_hour, limit_watts}` pairs, sorted by hour. The active period is the one with the largest `start_hour <= current_hour`. If `limit_watts` is 0, charging is blocked during that window. The schedule repeats daily.
+- During the configured off-peak window, Auto immediately applies the configured current cap and permits grid power.
+- At other times, Auto turns off if site telemetry is older than 3 minutes or known battery SoC is below its configured minimum.
+- Above the configurable grid-import deadband (150 W by default), Auto steps down after two checks (about 1 minute). With sustained surplus or battery-backed power, it steps up after six checks (about 3 minutes).
+- Levels are OFF, 6 A, 8 A, 16 A, and 32 A; the configured maximum caps the level. The exact maximum should not exceed the vehicle or installation limit.
+- Electricity rates are used for the charger cost estimate only; they do not affect the charging decision.
 
-```
-Example:
-  00:00 → 4800W  (overnight — full power)
-  16:00 → 1440W  (peak — reduced)
-```
-
-### Solar Smart (optional, AUTO mode only)
-
-When `solar_smart: true` and mode is AUTO, the bridge dynamically throttles charging power based on live solar/grid telemetry from ESY Sunhomes (MQTT):
-
-- **Off-Peak window** (`off_peak_start_hour` to `off_peak_end_hour`): Resets to the configured period rate — no throttling. Grid import is allowed during off-peak.
-- **Peak window**: Throttles down when grid import exceeds 500W. Ramps up slowly (10 min of sustained export required) with PV ≥ 500W and battery SOC > 30%.
-- Ramp step: 480W per check. Floor: 1440W minimum.
-- Throttle is per-CP and communicated via OCPP `SetChargingProfile` (TxDefaultProfile, Recurring+Daily).
-
-### Unified Decision Model (Mermaid)
-
-```mermaid
-flowchart TD
-    A[Inputs: time, SOC, PV, grid import/export, manual override] --> B{Override active?}
-    B -- Yes --> C{Override = ON or OFF?}
-    C -- OFF --> S1[Decision: STOP]
-    C -- ON --> G1{Battery SOC <= low threshold?}
-    G1 -- Yes --> P1[Set LOW current]
-    G1 -- No --> G2{SOC > battery priority and PV >= boost threshold and grid import <= buffer?}
-    G2 -- Yes --> P2[Set BOOST current]
-    G2 -- No --> P3[Set HIGH current]
-
-    B -- No --> T1{Off-peak time window?}
-    T1 -- Yes --> S2[Decision: ALLOW overnight current]
-    T1 -- No --> T2{Battery SOC <= priority threshold?}
-    T2 -- Yes --> S3[Decision: STOP]
-    T2 -- No --> T3{Battery SOC > 70% and PV >= 2000W and grid import <= buffer?}
-    T3 -- Yes --> P4[Set BOOST current]
-    T3 -- No --> T4{Grid import > deadband?}
-    T4 -- Yes --> S4[Decision: STOP]
-    T4 -- No --> T5{Available export power > minimum spare OR strong PV available?}
-    T5 -- No --> S5[Decision: STOP]
-    T5 -- Yes --> T6[Compute usable power]
-    T6 --> T7[Clamp to valid charger steps]
-    T7 --> S6[Decision: CHARGE at computed current]
-
-    P4 --> E1
-
-    S1 --> E1[Execution adapter]
-    P1 --> E1
-    P2 --> E1
-    P3 --> E1
-    S2 --> E1
-    S3 --> E1
-    S4 --> E1
-    S5 --> E1
-    S6 --> E1
-
-    E1 --> E2{Adapter type}
-    E2 -- X1 app --> X1[Tuya API: set switch/current]
-    E2 -- OCPP --> OCPP[OCPP profile/SetChargingProfile + RemoteStop if required]
-```
-
-The OCPP bridge and the X1 controller both evaluate the same decision tree. The only difference is the delivery mechanism: one writes charger state through Tuya commands, and the other enforces the limit through OCPP charging profiles and remote-stop semantics.
+The SEVR controller follows the same off-peak, telemetry-age, battery-reserve, import-deadband, and gradual-adjustment policy. Its valid current levels differ because the Tuya charger supports 8–32 A in 4 A increments; this OCPP service uses OCPP profiles and levels suitable for the connected charge point.
 
 ### Data Sources (Web UI)
 

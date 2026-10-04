@@ -1300,6 +1300,7 @@ DEFAULT_SCHEDULE = {
     "off_peak_end_hour": 6,
     "max_amps": 16,          # cap for Auto (off-peak and solar)
     "min_battery_soc": 50,   # Auto outside off-peak only runs at/above this %
+    "grid_deadband_w": 150,
     # All-in import prices in $/kWh, used for the charging cost estimate
     "off_peak_rate": OFFPEAK_RATE,
     "peak_rate_summer": round(GENERAL_RATE + SUMMER_DEMAND_RATE, 5),
@@ -2063,13 +2064,14 @@ def _auto_decide(cp_id: str) -> tuple[float, bool]:
                 ev_w = max(0.0, float(mv.get("power") or 0))
             except (TypeError, ValueError):
                 ev_w = 0.0
-            fit = min(cap, _snap_level((ev_w + exp - imp - AUTO_DEADBAND_W) / volts))
+            deadband = cfg.get("grid_deadband_w", AUTO_DEADBAND_W)
+            fit = min(cap, _snap_level((ev_w + exp - imp - deadband) / volts))
             lower = max([l for l in (0,) + AUTO_LEVELS_A if l < cur], default=0)
             if soc is not None and soc < cfg.get("min_battery_soc", 50):
                 candidate, direction, need, why = 0, "down", 1, f"battery {soc}% below minimum"
             elif cur > cap:
                 candidate, direction, need, why = cap, "down", 1, "above max amps"
-            elif imp > AUTO_DEADBAND_W:
+            elif imp > deadband:
                 candidate = min(fit, lower) if fit < cur else lower
                 direction, need, why = "down", AUTO_DOWN_CHECKS, f"grid import {imp}W"
             elif fit > cur:
@@ -2163,7 +2165,8 @@ async def handle_schedule_post(request):
 
     Body: {"cp_id", "mode": "stop"|"auto"|"charge_now", "timezone"?,
            "off_peak_start_hour"?, "off_peak_end_hour"?,
-           "max_amps"? (6|8|16|32), "min_battery_soc"? (0-100)}
+           "max_amps"? (6|8|16|32), "min_battery_soc"? (0-100),
+           "grid_deadband_w"? (0-5000)}
     """
     try:
         body = await request.json()
@@ -2208,6 +2211,11 @@ async def handle_schedule_post(request):
             if not (0 <= soc <= 100):
                 return web.json_response({"error": f"Invalid min_battery_soc: {soc}"}, status=400)
             config["min_battery_soc"] = soc
+        if "grid_deadband_w" in body:
+            deadband = int(body["grid_deadband_w"])
+            if not (0 <= deadband <= 5000):
+                return web.json_response({"error": f"Invalid grid_deadband_w: {deadband}"}, status=400)
+            config["grid_deadband_w"] = deadband
         for key in ("off_peak_rate", "peak_rate_summer", "peak_rate_other"):
             if key in body:
                 rate = float(body[key])

@@ -233,6 +233,18 @@ body {
 
 .power-context strong { color: var(--aws-text); }
 
+.schedule-details {
+  margin-top: 10px;
+  color: var(--aws-text-secondary);
+  font-size: 12px;
+}
+
+.schedule-details summary {
+  color: var(--aws-blue);
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .tariff-details {
   margin-top: 12px;
   padding-top: 10px;
