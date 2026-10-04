@@ -873,3 +873,9 @@ body {
     justify-content: flex-end;
   }
 }
+
+.brand-short { display: none; }
+@media (max-width: 640px) {
+  .brand-long { display: none; }
+  .brand-short { display: inline; }
+}

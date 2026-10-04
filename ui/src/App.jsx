@@ -826,7 +826,7 @@ function Home() {
       <header className="aws-navbar">
         <div className="navbar-brand">
           <span className="brand-icon">🔌</span><span>IoT Core</span>
-          <span className="brand-divider">|</span><span className="brand-service">OCPP MQTT Bridge</span>
+          <span className="brand-divider">|</span><span className="brand-service"><span className="brand-long">OCPP MQTT Bridge</span><span className="brand-short">OCPP</span></span>
         </div>
       </header>
       <main className="main-content">
