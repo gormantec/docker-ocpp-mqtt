@@ -240,6 +240,23 @@ def _current_total_power_watts() -> float:
     return total
 
 
+def _fresh_charger_power_watts(ts: datetime, max_age_s: float = 300.0) -> float:
+    """Charger power from meter values reported within max_age_s (ignores restored stale values)."""
+    total = 0.0
+    for cp in _cp_state.values():
+        for conn_id, conn_mv in cp.get("meter_values", {}).items():
+            if conn_id == "0":
+                continue
+            power = conn_mv.get("power")
+            try:
+                age = (ts - datetime.fromisoformat(conn_mv.get("received_at"))).total_seconds()
+            except Exception:
+                continue
+            if isinstance(power, (int, float)) and 0 <= age <= max_age_s:
+                total += max(0.0, float(power))
+    return total
+
+
 def _record_hourly_sample(ts: datetime | None = None):
     """Record one backend sample of aggregate charger power into an hourly bucket."""
     global _hourly_history
@@ -296,6 +313,7 @@ async def _hourly_history_loop():
     while True:
         try:
             _record_hourly_sample(datetime.now(timezone.utc))
+            _record_daily_energy_sample(datetime.now(timezone.utc))
             await _docdb_flush_graph_history()
         except Exception as e:
             _LOGGER.error("Hourly history sample error: %s", e)
@@ -314,8 +332,8 @@ def _import_rate_for_time(ts: datetime) -> float:
     return GENERAL_RATE + demand
 
 
-def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_w: float, load_w: float = 0.0):
-    """Integrate ESY grid telemetry over time into per-day usage/cost buckets."""
+def _record_daily_energy_sample(ts: datetime):
+    """Integrate charger power over time into per-day energy and time-of-use cost buckets."""
     global _last_esy_sample_at
     if _last_esy_sample_at is None:
         _last_esy_sample_at = ts
@@ -328,10 +346,10 @@ def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_
 
     dt_hours = min(dt_hours, 1.0)
 
-    import_kwh = max(0.0, float(grid_import_w)) * dt_hours / 1000.0
-    export_kwh = max(0.0, float(grid_export_w)) * dt_hours / 1000.0
-    load_kwh = max(0.0, float(load_w)) * dt_hours / 1000.0
-    cost_delta = (import_kwh * _import_rate_for_time(ts)) - (export_kwh * FEED_IN_TARIFF)
+    import_kwh = _fresh_charger_power_watts(ts) * dt_hours / 1000.0
+    export_kwh = 0.0
+    load_kwh = import_kwh
+    cost_delta = import_kwh * _import_rate_for_time(ts)
 
     day_key = _daily_key(ts)
     bucket = _daily_energy_history.get(day_key, {
@@ -356,10 +374,10 @@ def _record_daily_energy_sample(ts: datetime, grid_import_w: float, grid_export_
         try:
             if datetime.strptime(key, "%Y-%m-%d").date() < cutoff_day:
                 del _daily_energy_history[key]
-                _expired_history_docs.add(f"history:daily:{key}")
+                _expired_history_docs.add(f"history:chargerdaily:{key}")
         except Exception:
             del _daily_energy_history[key]
-            _expired_history_docs.add(f"history:daily:{key}")
+            _expired_history_docs.add(f"history:chargerdaily:{key}")
 
 
 def _daily_usage_60d_for_debug(now: datetime) -> dict:
@@ -1138,12 +1156,6 @@ async def mqtt_listener():
                     if "pvPower" in data:
                         _solar_metrics["pv_power"] = int(float(data["pvPower"]))
                     _solar_metrics["last_update"] = datetime.now(timezone.utc)
-                    _record_daily_energy_sample(
-                        _solar_metrics["last_update"],
-                        _solar_metrics["grid_import"],
-                        _solar_metrics["grid_export"],
-                        _solar_metrics["load_power"],
-                    )
                     await _docdb_save_metrics()
                 except Exception:
                     pass
@@ -1432,7 +1444,7 @@ async def _docdb_flush_graph_history():
             _dirty_daily_energy_history.discard(key)
             continue
         snapshot = dict(bucket)
-        if await _docdb_put_document({"_id": f"history:daily:{key}", "date": key, **snapshot}):
+        if await _docdb_put_document({"_id": f"history:chargerdaily:{key}", "date": key, **snapshot}):
             if _daily_energy_history.get(key) == snapshot:
                 _dirty_daily_energy_history.discard(key)
 
@@ -1471,8 +1483,8 @@ async def _docdb_load_history():
                     for key in ("sum_kw", "sum_pv_kw", "sum_grid_export_kw", "sum_grid_import_kw", "sum_load_kw", "samples")
                 }
                 restored_hourly += 1
-        elif doc_id.startswith("history:daily:"):
-            key = document.get("date", doc_id.removeprefix("history:daily:"))
+        elif doc_id.startswith("history:chargerdaily:"):
+            key = document.get("date", doc_id.removeprefix("history:chargerdaily:"))
             try:
                 day = datetime.strptime(key, "%Y-%m-%d").date()
             except (TypeError, ValueError):

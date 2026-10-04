@@ -64,7 +64,7 @@ const buildDailyUsageSeries = (daily) => {
       label: String(date.getDate()).padStart(2, '0') + '/' + String(date.getMonth() + 1).padStart(2, '0'),
       day: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
       usage_kwh: Number(entry.usage_kwh || 0),
-      cost: samples > 0 ? Number(entry.cost || 0) : null,
+      cost: Number(entry.cost || 0),
       samples,
     };
   });
@@ -428,13 +428,13 @@ function ChargerPage({ routeCpId }) {
             </div>
             <div className="summary-card">
               <div className="summary-value">
-                {Number(todayUsage?.samples || 0) > 0 ? formatCurrency(todayUsage.cost) : '—'}
+                {formatCurrency(todayUsage?.cost || 0)}
               </div>
               <div className="summary-label">
-                Today Net Grid Spend
-                {Number(todayUsage?.samples || 0) > 0 && (
+                Today Charging Cost
+                {Number(todayUsage?.usage_kwh || 0) > 0 && (
                   <span className="summary-subtext">
-                    {`${Number(todayUsage.usage_kwh || 0).toFixed(2)} kWh imported · estimate`}
+                    {`${Number(todayUsage.usage_kwh).toFixed(2)} kWh · estimate`}
                   </span>
                 )}
               </div>
@@ -598,12 +598,12 @@ function ChargerPage({ routeCpId }) {
                       <Tooltip
                         labelFormatter={(_, payload) => payload?.[0]?.payload?.day || 'Day'}
                         formatter={(value, name) => {
-                          if (name === 'Grid import') return [`${Number(value).toFixed(2)} kWh`, name];
+                          if (name === 'Charger energy') return [`${Number(value).toFixed(2)} kWh`, name];
                           return [formatCurrency(value), name];
                         }}
                       />
-                      <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Grid import" stroke="#0073BB" strokeWidth={2} dot={false} />
-                      <Line yAxisId="cost" type="linear" dataKey="cost" name="Estimated net site cost" stroke="#D13212" strokeWidth={2} dot={false} connectNulls={false} />
+                      <Line yAxisId="usage" type="monotone" dataKey="usage_kwh" name="Charger energy" stroke="#0073BB" strokeWidth={2} dot={false} />
+                      <Line yAxisId="cost" type="linear" dataKey="cost" name="Estimated charging cost" stroke="#D13212" strokeWidth={2} dot={false} connectNulls={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
@@ -614,10 +614,10 @@ function ChargerPage({ routeCpId }) {
                   <summary>Cost estimate and tariff assumptions</summary>
                   {data.grid_tariff ? (
                     <div className="tariff-detail-list">
-                      <span>Whole-site grid imports, less feed-in credits; not EV-only charging cost.</span>
+                      <span>Charger energy (kWh) multiplied by the time-of-use rate in effect when it was drawn.</span>
                       <span>Off-peak: {formatCurrency(data.grid_tariff.off_peak_rate, 4)}/kWh, {String(data.grid_tariff.off_peak_start_hour).padStart(2, '0')}:00–{String(data.grid_tariff.off_peak_end_hour).padStart(2, '0')}:00.</span>
                       <span>General: {formatCurrency(data.grid_tariff.general_rate, 4)}/kWh plus seasonal demand adder: summer {formatCurrency(data.grid_tariff.summer_demand_rate, 4)}, other months {formatCurrency(data.grid_tariff.non_summer_demand_rate, 4)}.</span>
-                      <span>Feed-in credit: {formatCurrency(data.grid_tariff.feed_in_tariff, 4)}/kWh · {data.grid_tariff.timezone}.</span>
+                      <span>{data.grid_tariff.timezone}.</span>
                     </div>
                   ) : <p>Tariff settings are unavailable; treat these costs as indicative only.</p>}
                 </details>
