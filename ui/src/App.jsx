@@ -188,6 +188,7 @@ function ChargerPage({ routeCpId }) {
   const [editOffPeakStart, setEditOffPeakStart] = useState(0);
   const [editOffPeakEnd, setEditOffPeakEnd] = useState(6);
   const [editMaxAmps, setEditMaxAmps] = useState(16);
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [editMinBatterySoc, setEditMinBatterySoc] = useState(50);
   const [editRates, setEditRates] = useState({ off_peak_rate: 0.08, peak_rate_summer: 0.46761, peak_rate_other: 0.36960 });
   const [timezones, setTimezones] = useState([]);
@@ -650,15 +651,15 @@ function ChargerPage({ routeCpId }) {
 
           {selectedCp && (
             <div className="card">
-              <div className="card-header">
+              <div className="card-header" style={{cursor: 'pointer'}} onClick={() => setShowAllSessions(v => !v)}>
                 <h3>Charge History: {selectedCp.id}</h3>
-                <span className="text-secondary" style={{fontSize: 12}}>Recent sessions</span>
+                <span className="text-secondary" style={{fontSize: 12}}>{showAllSessions ? 'Hide ▲' : `Latest charge · show all ${(selectedCp.recent_charge_sessions || []).length} ▼`}</span>
               </div>
               <div className="card-body">
                 <div className="table-wrap"><table className="data-table">
                   <thead><tr><th>Started</th><th>State</th><th>Energy Delivered</th><th>Vehicle SoC</th><th>Health</th><th>Events</th></tr></thead>
                   <tbody>
-                    {(selectedCp.recent_charge_sessions || []).map((session) => {
+                    {(selectedCp.recent_charge_sessions || []).slice(0, showAllSessions ? undefined : 1).map((session) => {
                       const soc = session.soc_end_percent ?? session.soc_start_percent;
                       const healthClass = session.health === 'ok' ? 'badge-on' : session.health === 'faulted' ? 'badge-off' : 'badge-warn';
                       const eventCount = (session.faults || []).length + (session.monitoring_gaps || []).length;
