@@ -238,7 +238,8 @@ function ChargerPage({ routeCpId }) {
 
   const powerCps = selectedCp ? [selectedCp] : chargePoints;
   const powerSummary = summarizeChargePower(powerCps);
-  const totalPower = powerSummary.watts || 0;
+  const reportedTotalPower = powerSummary.watts || 0;
+  const totalPower = reportedTotalPower < 50 ? 0 : reportedTotalPower;
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
     [data?.hourly_history?.samples],
