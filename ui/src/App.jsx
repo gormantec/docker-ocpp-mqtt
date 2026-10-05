@@ -136,6 +136,8 @@ const readingIsStale = (timestamp) => {
 const formatPower = (watts) => watts > 500
   ? `${(watts / 1000).toFixed(2)}kW`
   : `${Math.round(watts)}W`;
+const normalizeChargerPower = (watts) => watts < 50 ? 0 : watts;
+const formatChargerPower = (watts) => formatPower(normalizeChargerPower(watts));
 
 const formatCurrency = (value, digits = 2) => {
   const amount = Number(value);
@@ -239,7 +241,7 @@ function ChargerPage({ routeCpId }) {
   const powerCps = selectedCp ? [selectedCp] : chargePoints;
   const powerSummary = summarizeChargePower(powerCps);
   const reportedTotalPower = powerSummary.watts || 0;
-  const totalPower = reportedTotalPower < 50 ? 0 : reportedTotalPower;
+  const totalPower = normalizeChargerPower(reportedTotalPower);
   const hourlyChartData = useMemo(
     () => buildHourlySeries(data?.hourly_history?.samples || []),
     [data?.hourly_history?.samples],
@@ -664,7 +666,7 @@ function ChargerPage({ routeCpId }) {
                   <tbody>
                     {Object.entries(selectedCp.physical_status || {}).map(([connId, status]) => {
                       const mv = (selectedCp.meter_values || {})[connId] || {};
-                      return (<tr key={connId}><td data-label="Connector">Connector {connId}</td><td data-label="Status"><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td data-label="Power">{mv.power != null ? formatPower(mv.power) : '—'}</td><td data-label="Cumulative import">{mv.energy != null ? (mv.energy / 1000).toFixed(1) + ' kWh' : '—'}</td><td data-label="Vehicle SoC">{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported by charger'}</td><td data-label="Last update" className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
+                      return (<tr key={connId}><td data-label="Connector">Connector {connId}</td><td data-label="Status"><span className={'badge ' + (status === 'Charging' ? 'badge-on' : status === 'Available' ? 'badge-info' : 'badge-off')}>{status}</span></td><td data-label="Power">{mv.power != null ? formatChargerPower(mv.power) : '—'}</td><td data-label="Cumulative import">{mv.energy != null ? (mv.energy / 1000).toFixed(1) + ' kWh' : '—'}</td><td data-label="Vehicle SoC">{mv.soc_percent != null ? mv.soc_percent + '%' : 'Not reported by charger'}</td><td data-label="Last update" className="date-cell">{mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : '—'}</td></tr>);
                     })}
                     {Object.keys(selectedCp.physical_status || {}).length === 0 && <tr className="empty-row"><td colSpan={6} style={{textAlign: 'center', color: '#95a5a6'}}>No connectors active</td></tr>}
                   </tbody>
@@ -870,7 +872,7 @@ function Home() {
         {cps && cps.length === 0 && <div className="empty-state"><p>No chargers known yet.</p></div>}
         <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16}}>
           {(cps || []).map(cp => {
-            const watts = summarizeChargePower([cp]).watts || 0;
+            const watts = normalizeChargerPower(summarizeChargePower([cp]).watts || 0);
             return (
               <a key={cp.id} href={BASE + encodeURIComponent(cp.id)}
                 style={{display: 'block', padding: 20, background: '#fff', border: '1px solid #D5DBDB', borderRadius: 6, textDecoration: 'none', color: '#16191F', boxShadow: '0 1px 2px rgba(0,0,0,0.08)'}}>
