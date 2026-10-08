@@ -1134,6 +1134,19 @@ async def _handle_mqtt_command(cp_id: str, payload: bytes):
 
 
 async def mqtt_listener():
+    """Run the MQTT listener forever, reconnecting after broker disconnects."""
+    while True:
+        try:
+            await _mqtt_listener_once()
+            _LOGGER.warning("MQTT listener ended; reconnecting in 5s")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _LOGGER.error("MQTT listener failed: %s; reconnecting in 5s", e)
+        await asyncio.sleep(5)
+
+
+async def _mqtt_listener_once():
     """Subscribe to MQTT command topics and forward to charge points."""
     global _mqtt_client
     _LOGGER.info("Starting MQTT listener...")
@@ -1167,8 +1180,8 @@ async def mqtt_listener():
                         _solar_metrics["pv_power"] = int(float(data["pvPower"]))
                     _solar_metrics["last_update"] = datetime.now(timezone.utc)
                     await _docdb_save_metrics()
-                except Exception:
-                    pass
+                except Exception as e:
+                    _LOGGER.warning("Failed to process ESY telemetry: %s", e)
 
 
 # ---------------------------------------------------------------------------
