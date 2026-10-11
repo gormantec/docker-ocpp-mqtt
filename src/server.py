@@ -1570,6 +1570,65 @@ async def _restore_charge_session(document: dict, now: datetime):
         await _persist_charge_session(document)
 
 
+async def _migrate_legacy_history_to_aurora():
+    """Move any remaining legacy DocumentDB history docs into Aurora.
+
+    Runs once per startup before the history load so Aurora becomes the single
+    authoritative history store. Idempotent: buckets/sessions are upserted and
+    events are inserted only when not already present, then the legacy docs are
+    removed from DocumentDB.
+    """
+    if not (_aurora.enabled and DOCDB_ENABLED):
+        return
+    path = f"{quote(DOCDB_DB, safe='')}/_all_docs?include_docs=true&limit=10000"
+    ok, data = await _docdb_request("GET", path)
+    if not ok:
+        return
+
+    hourly: dict[str, dict] = {}
+    daily: dict[str, dict] = {}
+    events: list[dict] = []
+    sessions: dict[str, dict] = {}
+    legacy_ids: list[str] = []
+    for row in data.get("rows", []):
+        document = row.get("doc") or {}
+        doc_id = document.get("_id", row.get("id", ""))
+        if doc_id.startswith("history:hourly:"):
+            key = document.get("hour", doc_id.removeprefix("history:hourly:"))
+            hourly[key] = {
+                name: document.get(name, 0.0)
+                for name in ("sum_kw", "sum_pv_kw", "sum_grid_export_kw", "sum_grid_import_kw", "sum_load_kw", "samples")
+            }
+            legacy_ids.append(doc_id)
+        elif doc_id.startswith("history:chargerdaily:"):
+            key = document.get("date", doc_id.removeprefix("history:chargerdaily:"))
+            daily[key] = {
+                name: document.get(name, 0.0)
+                for name in ("import_kwh", "export_kwh", "load_kwh", "net_kwh", "cost", "samples")
+            }
+            legacy_ids.append(doc_id)
+        elif doc_id == "history:events":
+            events = list(document.get("events", []))
+            legacy_ids.append(doc_id)
+        elif doc_id.startswith("charge:"):
+            sessions[doc_id] = document
+            legacy_ids.append(doc_id)
+
+    if not legacy_ids:
+        return
+
+    if not await _aurora.migrate_legacy_history(hourly, daily, events, sessions, MAX_PERSISTED_EVENTS):
+        _LOGGER.warning("Legacy history migration to Aurora failed; will retry on next start")
+        return
+
+    for doc_id in legacy_ids:
+        await _docdb_delete_document(doc_id)
+    _LOGGER.info(
+        "Migrated legacy DocumentDB history to Aurora: %d hourly, %d daily, %d event(s), %d session(s)",
+        len(hourly), len(daily), len(events), len(sessions),
+    )
+
+
 async def _docdb_load_history():
     now = datetime.now(timezone.utc)
 
@@ -2600,6 +2659,9 @@ async def main():
     # Initialize DocumentDB
     if DOCDB_ENABLED:
         await _docdb_ensure_db()
+        # Move any legacy DocumentDB history into Aurora before loading, so
+        # Aurora is the single authoritative history store from here on.
+        await _migrate_legacy_history_to_aurora()
         await _docdb_load_history()
         await _docdb_load_schedules()
         await _docdb_load_metrics()
