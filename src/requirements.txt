@@ -3,3 +3,4 @@ cryptography
 websockets
 ocpp
 aiohttp
+PyMySQL>=1.1.0

@@ -63,6 +63,7 @@ from charge_history import (
     parse_meter_values,
     record_session_meter,
 )
+from aurora_store import AuroraHistoryStore
 
 logging.basicConfig(level=logging.INFO)
 _LOGGER = logging.getLogger(__name__)
@@ -127,6 +128,9 @@ DOCDB_USER = _env_str("DOCDB_USER", "admin")
 DOCDB_PASSWORD = _env_str("DOCDB_PASSWORD", "password")
 DOCDB_ENABLED = bool(DOCDB_URL)
 DOCDB_DB = _env_str("DOCDB_DB", "ocpp_mqtt")
+# Historic/time-series data lives in Aurora; singleton + config state
+# (schedules, cpstate, site:metrics) stays in DocumentDB.
+_aurora = AuroraHistoryStore()
 CHARGE_HISTORY_RETENTION_DAYS = _env_int("CHARGE_HISTORY_RETENTION_DAYS", 90)
 MAX_SESSION_SAMPLES = _env_int("MAX_SESSION_SAMPLES", 720)
 MAX_PERSISTED_EVENTS = _env_int("MAX_PERSISTED_EVENTS", 500)
@@ -214,9 +218,12 @@ def _record_event(cp_id: str, event_type: str, summary: str = "", details=None,
                             "connectors": {},  # per-connector -> status
                             "meter_values": {}}  # per-connector -> {power, energy, timestamp}
     _cp_state[cp_id]["last_event"] = event["time"]
-    if persist and DOCDB_ENABLED and event_type in _persisted_event_types:
+    if persist and event_type in _persisted_event_types:
         try:
-            asyncio.get_running_loop().create_task(_docdb_save_event(event))
+            if _aurora.enabled:
+                asyncio.get_running_loop().create_task(_aurora_save_event(event))
+            elif DOCDB_ENABLED:
+                asyncio.get_running_loop().create_task(_docdb_save_event(event))
         except RuntimeError:
             _LOGGER.warning("Could not persist %s event outside the async loop", event_type)
     return event
@@ -500,9 +507,12 @@ def _get_or_create_charge_session(cp_id, connector_id, received_at, source):
 
 
 async def _persist_charge_session(session):
+    session["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # Charge sessions are history -> Aurora (fallback to DocumentDB if unavailable).
+    if _aurora.enabled and await _aurora.save_session(session):
+        return
     if not DOCDB_ENABLED:
         return
-    session["updated_at"] = datetime.now(timezone.utc).isoformat()
     if not await _docdb_put_document(session):
         _LOGGER.error("Could not persist charge session %s", session.get("session_id"))
 
@@ -1247,6 +1257,15 @@ async def handle_debug(request):
         },
         "solar_throttle": {k: v["throttled_watts"] for k, v in _solar_throttle.items()},
         "profile_checks": _profile_checks,
+        "persistence": {
+            "singleton": "docdb" if DOCDB_ENABLED else "memory",
+            "history": _aurora.status if _aurora.enabled else ("docdb" if DOCDB_ENABLED else "memory"),
+            "aurora": {
+                "enabled": _aurora.enabled,
+                "status": _aurora.status,
+                "database": _aurora.database if _aurora.enabled else "",
+            },
+        },
         "hourly_history": _hourly_history_for_debug(now),
         "daily_usage_60d": _daily_usage_60d_for_debug(now),
         "grid_tariff": {
@@ -1418,6 +1437,14 @@ async def _docdb_delete_document(doc_id: str) -> bool:
         return ok
 
 
+async def _aurora_save_event(event: dict):
+    """Append an OCPP event to Aurora; fall back to DocumentDB on failure."""
+    if await _aurora.append_event(event, MAX_PERSISTED_EVENTS):
+        return
+    if DOCDB_ENABLED:
+        await _docdb_save_event(event)
+
+
 async def _docdb_save_event(event: dict):
     if not DOCDB_ENABLED:
         return
@@ -1446,6 +1473,26 @@ async def _docdb_save_event(event: dict):
 
 
 async def _docdb_flush_graph_history():
+    # Historic graph buckets live in Aurora; DocumentDB is the fallback.
+    if _aurora.enabled:
+        dirty_hourly = {
+            key: _hourly_history[key]
+            for key in tuple(_dirty_hourly_history) if key in _hourly_history
+        }
+        dirty_daily = {
+            key: _daily_energy_history[key]
+            for key in tuple(_dirty_daily_energy_history) if key in _daily_energy_history
+        }
+        if _expired_history_docs:
+            removed = await _aurora.delete_documents(tuple(_expired_history_docs))
+            if removed is not None:
+                _expired_history_docs.clear()
+        if dirty_hourly or dirty_daily:
+            if await _aurora.flush_graph_history(dirty_hourly, dirty_daily):
+                _dirty_hourly_history.difference_update(dirty_hourly.keys())
+                _dirty_daily_energy_history.difference_update(dirty_daily.keys())
+        return
+
     if not DOCDB_ENABLED:
         return
     for doc_id in tuple(_expired_history_docs):
@@ -1473,7 +1520,80 @@ async def _docdb_flush_graph_history():
                 _dirty_daily_energy_history.discard(key)
 
 
+def _prune_history(hourly: dict, daily: dict, sessions: dict, now: datetime) -> list[str]:
+    """Drop expired buckets/sessions in place; return the ids to delete."""
+    hourly_cutoff = now - timedelta(hours=HISTORY_RETENTION_HOURS)
+    daily_cutoff = (now.astimezone(ENERGY_TZ) - timedelta(days=DAILY_RETENTION_DAYS)).date()
+    session_cutoff = now - timedelta(days=CHARGE_HISTORY_RETENTION_DAYS)
+    expired: list[str] = []
+    for key in list(hourly.keys()):
+        try:
+            keep = datetime.fromisoformat(str(key).replace("Z", "+00:00")) >= hourly_cutoff
+        except (TypeError, ValueError):
+            keep = False
+        if not keep:
+            del hourly[key]
+            expired.append(f"history:hourly:{key}")
+    for key in list(daily.keys()):
+        try:
+            keep = datetime.strptime(str(key), "%Y-%m-%d").date() >= daily_cutoff
+        except (TypeError, ValueError):
+            keep = False
+        if not keep:
+            del daily[key]
+            expired.append(f"history:chargerdaily:{key}")
+    for doc_id, doc in list(sessions.items()):
+        plugged_at = _parse_utc_time(doc.get("plugged_at"))
+        if plugged_at and plugged_at < session_cutoff and doc.get("ended_at"):
+            del sessions[doc_id]
+            expired.append(doc_id)
+    return expired
+
+
+async def _restore_charge_session(document: dict, now: datetime):
+    """Restore one persisted session and reopen it as interrupted if unfinished."""
+    global _last_transaction_id
+    doc_id = document.get("_id")
+    if not doc_id:
+        return
+    _charge_sessions[doc_id] = document
+    try:
+        _last_transaction_id = max(
+            _last_transaction_id, int(document.get("transaction_id") or 0)
+        )
+    except (TypeError, ValueError):
+        pass
+    if not document.get("ended_at"):
+        open_monitoring_gap(document, now, "bridge_restarted")
+        key = _charge_session_key(document.get("charge_point_id"), document.get("connector_id"))
+        _active_charge_sessions[key] = doc_id
+        await _persist_charge_session(document)
+
+
 async def _docdb_load_history():
+    now = datetime.now(timezone.utc)
+
+    # Historic data is authoritative in Aurora. Fall back to the legacy
+    # DocumentDB history documents when Aurora is disabled or still empty, so
+    # existing deployments migrate on the next write.
+    if _aurora.enabled:
+        hourly, daily, events, sessions = await _aurora.load_history(MAX_PERSISTED_EVENTS)
+        if hourly or daily or events or sessions:
+            expired = _prune_history(hourly, daily, sessions, now)
+            _hourly_history.update(hourly)
+            _daily_energy_history.update(daily)
+            _event_buffer.extend(sorted(events, key=lambda item: item.get("time", ""))[-MAX_EVENTS:])
+            for document in sessions.values():
+                await _restore_charge_session(document, now)
+            if expired:
+                await _aurora.delete_documents(expired)
+            _LOGGER.info(
+                "Restored OCPP history from Aurora: %d hourly, %d daily, %d session(s)",
+                len(hourly), len(daily), len(sessions),
+            )
+            return
+        _LOGGER.info("Aurora history empty; checking DocumentDB for legacy history")
+
     if not DOCDB_ENABLED:
         return
     path = f"{quote(DOCDB_DB, safe='')}/_all_docs?include_docs=true&limit=10000"
@@ -1482,68 +1602,38 @@ async def _docdb_load_history():
         _LOGGER.warning("Could not restore persisted OCPP history")
         return
 
-    now = datetime.now(timezone.utc)
-    hourly_cutoff = now - timedelta(hours=HISTORY_RETENTION_HOURS)
-    daily_cutoff = (now.astimezone(ENERGY_TZ) - timedelta(days=DAILY_RETENTION_DAYS)).date()
-    session_cutoff = now - timedelta(days=CHARGE_HISTORY_RETENTION_DAYS)
-    expired = []
-    restored_hourly = restored_daily = 0
-    global _last_transaction_id
+    hourly: dict[str, dict] = {}
+    daily: dict[str, dict] = {}
+    sessions: dict[str, dict] = {}
+    events: list[dict] = []
     for row in data.get("rows", []):
         document = row.get("doc") or {}
         doc_id = document.get("_id", row.get("id", ""))
         if doc_id.startswith("history:hourly:"):
             key = document.get("hour", doc_id.removeprefix("history:hourly:"))
-            try:
-                slot = datetime.fromisoformat(key.replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                expired.append(doc_id)
-                continue
-            if slot < hourly_cutoff:
-                expired.append(doc_id)
-            else:
-                _hourly_history[key] = {
-                    key: document.get(key, 0.0)
-                    for key in ("sum_kw", "sum_pv_kw", "sum_grid_export_kw", "sum_grid_import_kw", "sum_load_kw", "samples")
-                }
-                restored_hourly += 1
+            hourly[key] = {
+                name: document.get(name, 0.0)
+                for name in ("sum_kw", "sum_pv_kw", "sum_grid_export_kw", "sum_grid_import_kw", "sum_load_kw", "samples")
+            }
         elif doc_id.startswith("history:chargerdaily:"):
             key = document.get("date", doc_id.removeprefix("history:chargerdaily:"))
-            try:
-                day = datetime.strptime(key, "%Y-%m-%d").date()
-            except (TypeError, ValueError):
-                expired.append(doc_id)
-                continue
-            if day < daily_cutoff:
-                expired.append(doc_id)
-            else:
-                _daily_energy_history[key] = {
-                    name: document.get(name, 0.0)
-                    for name in ("import_kwh", "export_kwh", "load_kwh", "net_kwh", "cost", "samples")
-                }
-                restored_daily += 1
+            daily[key] = {
+                name: document.get(name, 0.0)
+                for name in ("import_kwh", "export_kwh", "load_kwh", "net_kwh", "cost", "samples")
+            }
         elif doc_id == "history:events":
-            events = sorted(document.get("events", []), key=lambda item: item.get("time", ""))
-            _event_buffer.extend(events[-MAX_EVENTS:])
+            events = list(document.get("events", []))
         elif doc_id.startswith("charge:"):
-            plugged_at = _parse_utc_time(document.get("plugged_at"))
-            if plugged_at and plugged_at < session_cutoff and document.get("ended_at"):
-                expired.append(doc_id)
-                continue
-            _charge_sessions[doc_id] = document
-            try:
-                _last_transaction_id = max(
-                    _last_transaction_id, int(document.get("transaction_id") or 0)
-                )
-            except (TypeError, ValueError):
-                pass
-            if not document.get("ended_at"):
-                open_monitoring_gap(document, now, "bridge_restarted")
-                key = _charge_session_key(
-                    document.get("charge_point_id"), document.get("connector_id")
-                )
-                _active_charge_sessions[key] = doc_id
-                await _persist_charge_session(document)
+            sessions[doc_id] = document
+
+    expired = _prune_history(hourly, daily, sessions, now)
+    restored_hourly = len(hourly)
+    restored_daily = len(daily)
+    _hourly_history.update(hourly)
+    _daily_energy_history.update(daily)
+    _event_buffer.extend(sorted(events, key=lambda item: item.get("time", ""))[-MAX_EVENTS:])
+    for document in sessions.values():
+        await _restore_charge_session(document, now)
 
     for doc_id in expired:
         await _docdb_delete_document(doc_id)
